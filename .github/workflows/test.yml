@@ -1,0 +1,17 @@
+name: 规则测试
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # 写入边界靠 macOS 的 sandbox-exec，只能在苹果电脑上测
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # 不需要 npm install：没有任何依赖。git 测试要用系统自带的 git
+      - run: npm test

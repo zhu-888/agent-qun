@@ -1,0 +1,11 @@
+# 你自己的数据：项目登记、设置、手机配对、取出来的成员图标（data/icons/）
+data/
+# 默认的项目文件夹
+项目/
+node_modules/
+.DS_Store
+# 本地留着的东西，不发布
+多Agent项目工作群-开工提示词.txt
+web-classic/
+web-glass/
+web-minimal/

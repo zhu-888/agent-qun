@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>AgentQun · AI 工作群</title>
+<link rel="stylesheet" href="/app.css">
+<script>
+  // 外观：跟随系统，或者固定浅色 / 深色。尽早设置，避免闪一下。
+  (function () {
+    var pref = 'auto';
+    try { pref = localStorage.getItem('wg.theme') || 'auto'; } catch (e) {}
+    var dark = pref === 'dark' || (pref === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
+</head>
+<body>
+<a class="skip" href="#input">跳到输入框</a>
+
+<div id="app">
+  <!-- 左：顶上是名字、通知、搜索；“新对话”；三位成员（图标外面一圈是额度）；项目树，每个项目下面是它的对话 -->
+  <aside id="sidebar" aria-label="项目、对话和成员">
+    <div class="sb-top">
+      <button id="brandBtn" class="brand" aria-haspopup="menu" title="AgentQun · AI 工作群：外观、重新检测成员"><span>AgentQun</span><span class="ico" data-icon="chevron"></span></button>
+      <span class="spacer"></span>
+      <button id="bellBtn" class="icon-btn" title="等你处理的事" aria-label="等你处理的事" aria-haspopup="menu"><span class="ico" data-icon="bell"></span><i class="badge-dot" hidden></i></button>
+      <button id="searchBtn" class="icon-btn" title="搜索项目、对话、任务卡、成员、文件，或执行操作（⌘K）" aria-label="搜索"><span class="ico" data-icon="search"></span></button>
+    </div>
+    <button id="newChatBtn" class="sb-row" title="在当前项目里开一个新对话"><span class="ico" data-icon="compose"></span><span>新对话</span></button>
+    <div id="agentRow" aria-label="成员和额度"></div>
+    <div class="t-head"><span>项目</span><span class="spacer"></span><button id="newProjBtn" class="icon-btn small" title="新建项目" aria-label="新建项目"><span class="ico" data-icon="plus"></span></button></div>
+    <nav id="tree" class="side-scroll" aria-label="项目和对话"></nav>
+  </aside>
+
+  <!-- 中：当前对话 -->
+  <section id="main" aria-label="对话">
+    <header id="mainHead"></header>
+    <div id="summaryBar"></div>
+    <div id="chatWrap">
+      <!-- 聊天左边缘的一列短线：一条线 = 我说过的一句话。指上去弹出预览，点一下跳过去 -->
+      <nav id="rail" aria-label="我的发言：指上去看预览，点一下跳到那条消息" hidden></nav>
+      <div id="chat"></div>
+      <div id="railTip" role="tooltip" hidden></div>
+    </div>
+    <div id="live"></div>
+    <div id="composer">
+      <div id="replyBar" hidden></div>
+      <div class="input-shell">
+        <textarea id="input" rows="2" aria-label="发消息" placeholder="说目标，或 @ 成员"></textarea>
+        <div class="composer-row">
+          <button id="attachBtn" class="icon-btn" type="button" title="放文件进项目收件箱，群里会收到一次通知" aria-label="放文件进收件箱"><span class="ico" data-icon="paperclip"></span></button>
+          <input type="file" id="fileInput" multiple hidden>
+          <span class="lbl">发给</span>
+          <span id="atChips" class="at-chips"></span>
+          <span class="spacer"></span>
+          <label class="switch-row" title="把这句话建成一张任务卡，被点名的成员就是负责人">
+            <span>建任务卡</span>
+            <input type="checkbox" id="asTask" class="switch" checked>
+          </label>
+          <label class="switch-row" id="reviewRow" title="成果先由另一位成员独立核对，再交给你验收。小事可以关掉，省一整次运行；关掉后这张卡会标明“没有经过成员审查”">
+            <span>要审查</span>
+            <input type="checkbox" id="needReview" class="switch" checked>
+          </label>
+          <button id="sendBtn" class="send" title="发送：回车发送，Shift+回车换行" aria-label="发送"><span class="ico" data-icon="arrow-up"></span></button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 右：任务卡（工单） -->
+  <aside id="inspector" aria-label="任务卡">
+    <div id="taskHead"></div>
+    <div id="taskList" class="side-scroll"></div>
+  </aside>
+
+  <!-- 两条分隔条：拖动调整左右两栏的宽度 -->
+  <div id="rzLeft" class="resizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="左栏宽度：拖动调整，方向键微调，回车收起或展开" title="拖动调整左栏宽度；双击恢复默认"></div>
+  <div id="rzRight" class="resizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="右栏宽度：拖动调整，方向键微调，回车收起或展开" title="拖动调整右栏宽度；双击恢复默认"></div>
+</div>
+
+<div id="scrim" hidden></div>
+<div id="agentPop" role="dialog" hidden></div>
+<div id="popover" hidden></div>
+<div id="sheet" hidden><div id="sheetBox" role="dialog" aria-modal="true"></div></div>
+<div id="palette" hidden>
+  <div class="palette-box" role="dialog" aria-modal="true" aria-label="搜索或跳转">
+    <div class="palette-input"><span class="ico" data-icon="search"></span><input id="paletteInput" type="text" aria-label="搜索" placeholder="搜索，或输入操作" autocomplete="off" spellcheck="false"><kbd>esc</kbd></div>
+    <div id="paletteList" class="palette-list"></div>
+  </div>
+</div>
+<div id="banners" aria-live="polite"></div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

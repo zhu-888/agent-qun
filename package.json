@@ -1,0 +1,17 @@
+{
+  "name": "agent-qun",
+  "version": "0.1.0",
+  "description": "AgentQun · AI 工作群：本地中文多 Agent 工作台。一个项目一个工作群，@ 谁就唤醒谁的真实命令行会话（Claude Code、Codex、DeepSeek Harness）",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --no-warnings server/main.mjs",
+    "test": "node --no-warnings --test \"test/*.test.mjs\"",
+    "check:boundary": "node --no-warnings test/boundary-check.mjs",
+    "check:boundary:real": "node --no-warnings test/real-boundary.mjs"
+  }
+}
