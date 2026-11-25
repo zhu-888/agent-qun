@@ -10,7 +10,8 @@ import { Project, opensAsProgram } from '../server/project.mjs';
 import { Dispatcher, readableError, NO_PUSH_MSG } from '../server/dispatcher.mjs';
 import { handleQun, serveRpc } from '../server/rpc.mjs';
 import { parseMentions } from '../server/mentions.mjs';
-import { pickModel, tiersFor } from '../server/members.mjs';
+import { pickModel, tiersFor, configureMembers, cleanMemberSettings, upgradeSettings, member, enabledAgents, coordinator, defaultReviewer } from '../server/members.mjs';
+import { ROSTER, buildRoster, GENERIC_TITLE, GENERIC_ROLE } from '../server/roster.mjs';
 import { configureModels, readCodexModels, resetModels, findModel, cleanCustomModels, catalog, lockOf } from '../server/models.mjs';
 import { all, one } from '../server/store.mjs';
 import { spawnSync, spawn } from 'node:child_process';
@@ -1879,4 +1880,114 @@ test('不能推送：成员的 git 推送一律被拒（工作台认得出是被
   const cfg = fs.readFileSync(disp.gitConfigPath(), 'utf8');
   assert.ok(cfg.includes(`path = ${path.join(os.homedir(), '.gitconfig')}`));
   disp.dispose();
+});
+
+
+// ---- 成员表：启用 / 停用、分工、新成员默认“通用干活” ----------------------------------
+test('成员表：新成员没写分工就是“通用干活”；表本身写错了启动时就报出来', () => {
+  const [kimi] = buildRoster([{ name: 'Kimi', adapter: 'kimi', aliases: ['月之暗面'] }]);
+  assert.equal(kimi.title, GENERIC_TITLE);
+  assert.equal(kimi.role, GENERIC_ROLE);
+  assert.equal(kimi.enabled, true);
+  assert.equal(kimi.payPerUse, false);
+  assert.deepEqual(kimi.aliases, ['kimi', '月之暗面']);
+  assert.equal(kimi.id, 'kimi');
+  assert.ok(Object.isFrozen(kimi), '出厂资料只读，群主改的另存');
+  assert.throws(() => buildRoster([{ name: 'K-1', adapter: 'x' }]), /字母开头/);
+  assert.throws(() => buildRoster([{ name: 'Kimi', adapter: 'x' }, { name: 'kimi', adapter: 'y' }]), /重复/);
+  assert.throws(() => buildRoster([{ name: 'Kimi' }]), /adapter/);
+  assert.throws(() => buildRoster([{ name: 'A1', adapter: 'x', coordinator: true }, { name: 'B1', adapter: 'y', coordinator: true }]), /一位默认协调员/);
+  assert.throws(() => buildRoster([{ name: 'Kimi', adapter: 'x', color: { light: 'red' } }]), /#rrggbb/);
+  // 出厂的三位：别处不再写死名字，全从这张表来
+  assert.deepEqual(ROSTER.map((r) => r.name), ['Claude', 'Codex', 'DeepSeek']);
+  assert.equal(ROSTER.filter((r) => r.coordinator).map((r) => r.name).join(), 'Claude');
+  assert.deepEqual(parseMentions('@ds 看一下，@克劳德 汇总'), ['DeepSeek', 'Claude'], '别名也从成员表读');
+});
+
+test('成员设置：只存和出厂不同的；分工留空就恢复出厂；至少留一位启用', () => {
+  try {
+    const c = cleanMemberSettings({
+      Claude: { enabled: true, title: ROSTER[0].title, role: '  ' },           // 和出厂一样 / 留空：都不存
+      Codex: { title: '  只做 测试\n和接入 ', role: '你只写测试。\r\n别的不碰。' },
+      DeepSeek: { enabled: false },
+      Nobody: { enabled: false },                                              // 表里没有的成员：不理
+    });
+    assert.deepEqual(c, { Codex: { title: '只做 测试 和接入', role: '你只写测试。\n别的不碰。' }, DeepSeek: { enabled: false } });
+    assert.throws(() => cleanMemberSettings({ Claude: { enabled: false }, Codex: { enabled: false }, DeepSeek: { enabled: false } }), /至少要留一位/);
+    assert.throws(() => cleanMemberSettings({ Codex: { title: '长'.repeat(41) } }), /最多 40/);
+    assert.throws(() => cleanMemberSettings({ Codex: { role: '长'.repeat(801) } }), /最多 800/);
+
+    configureMembers(c);
+    assert.equal(member('Codex').title, '只做 测试 和接入');
+    assert.equal(member('Codex').defaultTitle, ROSTER[1].title, '出厂分工还在，界面上能“恢复出厂分工”');
+    assert.deepEqual(enabledAgents(), ['Claude', 'Codex']);
+    // 旧版设置：关掉了“允许 DeepSeek 使用 API key”的，升级后就是 DeepSeek 停用
+    assert.deepEqual(upgradeSettings({ deepseekApiAllowed: false, tiers: {} }), { tiers: {}, members: { DeepSeek: { enabled: false } } });
+    assert.deepEqual(upgradeSettings({ deepseekApiAllowed: true }), {});
+  } finally { configureMembers({}); }
+});
+
+test('停用成员：不算已连接，不能派活、不能当审查人，群主 @ 它会被告知“已停用”，提示词里不出现', () => {
+  const { project, disp, tasks } = setup('member-off');
+  try {
+    const t1 = tasks.create({ title: '格式分析', owner: 'DeepSeek', creator: '群主', kind: '分析' });   // 停用前派出去的卡
+    configureMembers({ DeepSeek: { enabled: false } });
+    assert.deepEqual(disp.connected(), ['Claude', 'Codex'], '命令行接着也不算');
+    assert.throws(() => tasks.create({ title: 'x', owner: 'DeepSeek', creator: '群主' }), /@DeepSeek 已停用，不能派给它/);
+    assert.throws(() => tasks.create({ title: 'x', owner: 'Codex', reviewer: 'DeepSeek', creator: '群主' }), /@DeepSeek 已停用，不能当审查人/);
+    assert.equal(defaultReviewer('Codex', disp.connected()), 'Claude');
+    assert.equal(defaultReviewer('Claude', disp.connected()), 'Codex');
+
+    const before = tasks.list().length;
+    disp.ownerSay({ text: '@DeepSeek 再看一个样例' });
+    assert.equal(tasks.list().length, before, '没有建卡');
+    assert.match(project.messages().at(-1).text, /@DeepSeek 已停用，没法接这个任务。要用它，到设置 →「成员」里打开/);
+    disp.routeMentions({ id: 99, sender: 'Claude', mentions: ['DeepSeek'], text: '@DeepSeek 看下', chainId: null }, { byAgent: true });
+    assert.match(project.messages().at(-1).text, /@DeepSeek 已停用，#99 这条消息没有送达/);
+
+    const pr = buildPrompt({ agent: 'Claude', project, tasks, wakes: [{ reason: 'mention' }], connected: disp.connected(), resumed: false, qunPath: 'qun', writable: [], enforced: true });
+    const rules = pr.slice(0, pr.indexOf('【最近群聊】'));      // 群聊记录是背景资料，里面可以有它的名字
+    assert.doesNotMatch(rules, /@DeepSeek/, '成员名单和派活规则里都没有它');
+    assert.match(pr, /@Codex：工程负责人/);
+    assert.match(pr, /【你是协调员】/);
+
+    // 它手上的卡：马上提醒群主一次，不等 20 分钟
+    project.patchSettings({ paused: false });        // 项目暂停时不查（测试项目默认是暂停的，免得成员真的开跑）
+    disp.checkStale(); disp.checkStale();
+    project.patchSettings({ paused: true });
+    const off = project.messages().filter((m) => /已在设置里停用/.test(m.text));
+    assert.equal(off.length, 1);
+    assert.match(off[0].text, new RegExp(`任务 ${t1.id}「格式分析」该 @DeepSeek 做`));
+  } finally { configureMembers({}); disp.dispose(); }
+});
+
+test('协调员停用了：没点名的需求交给表里第一位启用的成员，它拿到协调员的说明', () => {
+  const { project, disp, tasks } = setup('coord-off');
+  try {
+    configureMembers({ Claude: { enabled: false } });
+    assert.equal(coordinator(), 'Codex');
+    disp.ownerSay({ text: '帮我把收件箱整理一下' });
+    const t = tasks.list().at(-1);
+    assert.equal(t.owner, 'Codex');
+    assert.equal(t.kind, '协调');
+    assert.equal(t.reviewer, 'DeepSeek', '能审的只剩 DeepSeek');
+    const pr = buildPrompt({ agent: 'Codex', project, tasks, wakes: [{ reason: 'task_assigned', task_id: t.id }], connected: disp.connected(), resumed: false, qunPath: 'qun', lane: t.id, writable: [], enforced: true });
+    assert.match(pr, /【你是协调员】/);
+    assert.doesNotMatch(pr.slice(0, pr.indexOf('【最近群聊】')), /@Claude/);
+    // 群摘要原来选的是 Claude：它停用了就由协调员写
+    project.patchSettings({ summaryAgent: 'Claude' });
+    assert.equal(disp.summaryWriter(), 'Codex');
+  } finally { configureMembers({}); disp.dispose(); }
+  assert.equal(coordinator(), 'Claude', '恢复出厂后还是 Claude');
+});
+
+test('改过的分工：成员自己的身份和协调员看到的名单都跟着变', () => {
+  const { project, disp, tasks } = setup('member-role');
+  try {
+    configureMembers({ Codex: { title: '只写测试', role: '你只负责写测试，不写业务代码。' } });
+    const mine = buildPrompt({ agent: 'Codex', project, tasks, wakes: [{ reason: 'mention' }], connected: disp.connected(), resumed: false, qunPath: 'qun', writable: [], enforced: true });
+    assert.match(mine, /成员 @Codex（只写测试）。.*你只负责写测试，不写业务代码。/s);
+    const coord = buildPrompt({ agent: 'Claude', project, tasks, wakes: [{ reason: 'mention' }], connected: disp.connected(), resumed: false, qunPath: 'qun', writable: [], enforced: true });
+    assert.match(coord, /@Codex：只写测试，已连接/);
+  } finally { configureMembers({}); disp.dispose(); }
 });

@@ -14,7 +14,10 @@ import { execFileSync } from 'node:child_process';
 import { all, one, run, tx, J } from './store.mjs';
 import { now, DIRS } from './project.mjs';
 import { normalizeScopeEntry, scopesOverlap, REVIEW_DIR } from './boundary.mjs';
-import { AGENTS, COORDINATOR, OWNER, defaultReviewer, LEVELS } from './members.mjs';
+import { ALL_AGENTS, enabledAgents, isEnabled, coordinator, OWNER, defaultReviewer, LEVELS } from './members.mjs';
+
+// 叫不动的成员是哪一种：群主在设置里停用的，还是命令行没接上的
+const offline = (n) => (isEnabled(n) ? '未连接' : '已停用');
 import { WtError } from './worktrees.mjs';
 import { MODEL_ID_RE } from './models.mjs';
 
@@ -149,9 +152,9 @@ export class Tasks {
            kind = '实现', level = null, model = null, chainId = null, originMsg = null, selfStart = false, write = [], noReview = false }) {
     title = String(title ?? '').trim();
     if (!title) fail('任务要有标题（--title）');
-    owner = this.normName(owner) ?? fail(`负责人必须是群成员之一：${AGENTS.join('、')}`);
+    owner = this.normName(owner) ?? fail(`负责人必须是群成员之一：${enabledAgents().join('、')}`);
     const connected = this.hooks.connected();
-    if (!connected.includes(owner)) fail(`@${owner} 未连接，不能派给它。已连接的成员：${connected.join('、') || '无'}`);
+    if (!connected.includes(owner)) fail(`@${owner} ${offline(owner)}，不能派给它。已连接的成员：${connected.join('、') || '无'}`);
     if (creator !== OWNER && creator !== owner) {
       if (!String(deliver).trim()) fail('派给别人的任务要写清交付物（--deliver）');
       if (!String(accept).trim()) fail('派给别人的任务要写清验收条件（--accept）');
@@ -168,9 +171,9 @@ export class Tasks {
     if (noReview) {
       reviewer = null;
     } else if (reviewer) {
-      reviewer = this.normName(reviewer) ?? fail(`审查人必须是群成员之一：${AGENTS.join('、')}`);
+      reviewer = this.normName(reviewer) ?? fail(`审查人必须是群成员之一：${enabledAgents().join('、')}`);
       if (reviewer === owner) fail('审查人不能是负责人自己，请换一位');
-      if (!connected.includes(reviewer)) fail(`@${reviewer} 未连接，不能当审查人`);
+      if (!connected.includes(reviewer)) fail(`@${reviewer} ${offline(reviewer)}，不能当审查人`);
     } else {
       reviewer = defaultReviewer(owner, connected);
     }
@@ -215,7 +218,7 @@ export class Tasks {
 
   normName(n) {
     const s = String(n ?? '').replace(/^[@＠]/, '').trim().toLowerCase();
-    return AGENTS.find((a) => a.toLowerCase() === s) ?? null;
+    return ALL_AGENTS.find((a) => a.toLowerCase() === s) ?? null;
   }
 
   // ---- 负责人的动作 -----------------------------------------------------
@@ -321,9 +324,10 @@ export class Tasks {
     const why = String(text ?? '').trim() || fail('请写清楚卡在哪');
     const nt = this.move(t, { state: 'blocked', prev_state: t.state }, { actor, type: 'blocked', text: why });
     this.card(nt, `任务 ${t.id}「${t.title}」卡住了（${actor === '系统' ? '工作台' : '@' + actor}）：${why}。@群主 请处理，或改派。`);
-    if (notifyCreator && actor !== COORDINATOR && t.creator === COORDINATOR) {
+    const coord = coordinator();
+    if (notifyCreator && actor !== coord && t.creator === coord) {
       this.hooks.wake({
-        target: COORDINATOR, reason: 'task_blocked', taskId: t.id, chainId: t.chainId,
+        target: coord, reason: 'task_blocked', taskId: t.id, chainId: t.chainId,
         dedupeKey: `task:${t.id}:blocked:${nt.revision}`, byAgent: true, note: why,
       });
     }
@@ -498,10 +502,10 @@ export class Tasks {
     const t = this.need(id);
     if (actor !== OWNER && actor !== t.creator && actor !== t.owner) fail(`只有群主、派单人或当前负责人能改派 ${t.id}`);
     if (['done', 'cancelled'].includes(t.state)) fail(`任务 ${t.id} 已结束，不能改派`);
-    const owner = this.normName(to) ?? fail(`改派对象必须是群成员之一：${AGENTS.join('、')}`);
+    const owner = this.normName(to) ?? fail(`改派对象必须是群成员之一：${enabledAgents().join('、')}`);
     if (owner === t.owner) fail(`任务 ${t.id} 本来就是 @${owner} 负责`);
     const connected = this.hooks.connected();
-    if (!connected.includes(owner)) fail(`@${owner} 未连接，不能改派给它`);
+    if (!connected.includes(owner)) fail(`@${owner} ${offline(owner)}，不能改派给它`);
     const reviewer = t.noReview ? null : t.reviewer && t.reviewer !== owner ? t.reviewer : defaultReviewer(owner, connected);
     this.hooks.cancelWakes(t.id, null);
     this.hooks.stopLane?.(t.owner, t.id, `任务改派给了 @${owner}`);

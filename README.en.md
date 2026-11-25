@@ -10,6 +10,7 @@ Dark theme: [docs/screenshot-dark.png](docs/screenshot-dark.png). The screenshot
 
 - One project = one group chat = one local folder. You are the group owner.
 - `@Claude`, `@Codex` or `@DeepSeek` in a message wakes that member's **real CLI session** (Claude Code, Codex app-server, DeepSeek Harness headless). Sessions are resumed, so each member keeps its context.
+- Members come from one table, `server/roster.mjs`. In Settings you can enable or disable each member and edit its role; a disabled member is never woken and drops out of the group. Adding another CLI means one row in that table plus an adapter file in `server/agents/`. A new member's default role is "general worker".
 - Work is tracked on task cards with a strict state machine: the owner submits, a *different* member reviews, and you accept or reject. Members hand work to each other with an automatic hand-off limit.
 - Each session can only write where its task card allows. This is enforced by macOS `sandbox-exec` (Claude, DeepSeek) and Codex's own sandbox (`writable_roots`), not just by prompts.
 - In git projects every task card gets its own worktree and branch. The workbench commits on the member's behalf, checks for conflicts with `git merge-tree` before merging, and **never pushes**. Members cannot `git push` either.

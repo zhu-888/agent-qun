@@ -15,7 +15,13 @@ import { execFileSync } from 'node:child_process';
 import { all, one, run, J } from './store.mjs';
 import { now, DIRS, rpcRunDir } from './project.mjs';
 import { Tasks, TaskError, clip } from './tasks.mjs';
-import { AGENTS, MEMBERS, OWNER, COORDINATOR, DEFAULT_PARALLEL, MAX_PARALLEL, pickModel } from './members.mjs';
+import { ALL_AGENTS, member, isEnabled, enabledAgents, coordinator, OWNER, DEFAULT_PARALLEL, MAX_PARALLEL, pickModel } from './members.mjs';
+
+// 叫不动一位成员时怎么跟群主说：停用的，说去设置里打开；没接上的，说怎么接通
+function offlineNote(name, st) {
+  if (!isEnabled(name)) return { what: '已停用', fix: '要用它，到设置 →「成员」里打开' };
+  return { what: '未连接', fix: st[name]?.fix ? '接通方法：' + st[name].fix : '' };
+}
 import { buildPrompt, buildInjectPrompt, buildSummaryPrompt, identityText } from './prompt.mjs';
 import { sandboxStatus, seatbeltProfile, MAIN_DRAFT } from './boundary.mjs';
 import { Snapshots } from './snapshots.mjs';
@@ -115,9 +121,21 @@ export class Dispatcher {
     const limitMs = (this.p.settings.staleMin ?? 20) * 60 * 1000;
     for (const t of this.tasks.list()) {
       if (!['dispatched', 'accepted', 'working', 'in_review'].includes(t.state)) continue;
-      if (now() - t.updatedTs < limitMs) continue;
       if (this.tasks.children(t.id).some((k) => !['done', 'cancelled'].includes(k.state))) continue;   // 在等子任务，不算停滞
       const who = t.state === 'in_review' ? t.reviewer : t.owner;
+      // 该它动手的成员被群主停用了：唤醒会一直排着，所以不等超时，直接说一次
+      if (who && !isEnabled(who) && !this.isBusy(who)) {
+        const key = `off:${t.id}:${t.revision}:${who}`;
+        if (this.p.getMeta(key)) continue;
+        this.p.setMeta(key, '1');
+        this.p.post({
+          sender: '系统', kind: 'system', taskId: t.id, chainId: t.chainId,
+          text: `任务 ${t.id}「${t.title}」该 @${who} ${t.state === 'in_review' ? '审查' : '做'}，但它已在设置里停用，这张卡会一直停着。@群主 可以改派、取消，或者到设置 →「成员」里重新打开它（打开后接着做）。`,
+          meta: { mentions: [OWNER] },
+        });
+        continue;
+      }
+      if (now() - t.updatedTs < limitMs) continue;
       if (this.isBusy(who)) continue;
       const pending = one(this.db, "SELECT COUNT(*) AS n FROM wakes WHERE task_id=? AND state IN ('queued','waiting','delivered','accepted','held')", t.id).n;
       if (pending) continue;
@@ -132,12 +150,12 @@ export class Dispatcher {
     }
   }
 
-  connected() { const st = this.env.status(); return AGENTS.filter((a) => st[a]?.connected); }
+  connected() { const st = this.env.status(); return enabledAgents().filter((a) => st[a]?.connected); }
 
   // 每个成员一个 qun 包装脚本，成员不用自己报名字。
   // 真正认身份靠请求目录：每次运行一个 .workgroup/rpc/req/<运行号>/，沙箱只放开这一个，工作台按目录认人（见 rpc.mjs）。
   ensureQunWrappers() {
-    for (const a of AGENTS) {
+    for (const a of ALL_AGENTS) {
       const dir = path.join(this.p.dir, DIRS.internal, 'bin', a);
       fs.mkdirSync(dir, { recursive: true });
       const q = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;   // 路径里有空格、引号也不会出错
@@ -233,7 +251,7 @@ export class Dispatcher {
 
   // ---- 唤醒单 ---------------------------------------------------------
   wake({ target, reason, taskId = null, sourceMsg = null, dedupeKey, chainId = null, byAgent = false, waiting = false, note = '' }) {
-    if (!AGENTS.includes(target)) return { created: false };
+    if (!ALL_AGENTS.includes(target)) return { created: false };      // 停用的成员也照样排队：群主重新打开它时接着做
     if (one(this.db, 'SELECT id FROM wakes WHERE target=? AND dedupe_key=?', target, dedupeKey)) return { created: false, duplicate: true };
     let state = waiting ? 'waiting' : 'queued';
     if (byAgent && chainId != null) {
@@ -288,8 +306,9 @@ export class Dispatcher {
     const st = this.env.status();
     for (const name of msg.mentions) {
       if (name === OWNER || name === msg.sender) continue;
-      if (!st[name]?.connected) {
-        this.p.system(`@${name} 未连接，#${msg.id} 这条消息没有送达。${st[name]?.fix ? '接通方法：' + st[name].fix : ''}`, { chainId: msg.chainId });
+      if (!st[name]?.connected || !isEnabled(name)) {
+        const off = offlineNote(name, st);
+        this.p.system(`@${name} ${off.what}，#${msg.id} 这条消息没有送达。${off.fix}`, { chainId: msg.chainId });
         continue;
       }
       // 同一个人 10 分钟内对同一个成员说一模一样的话，不重复派发
@@ -324,19 +343,20 @@ export class Dispatcher {
     if (taskId && chatId == null) chatId = this.tasks.get(taskId)?.chainId ?? null;   // 跟进任务卡：留在这张卡所在的对话里
     const msg = this.p.post({ sender: OWNER, text, replyTo, files, taskId, chainId: chatId });
     const st = this.env.status();
-    let targets = msg.mentions.filter((n) => AGENTS.includes(n));
+    let targets = msg.mentions.filter((n) => ALL_AGENTS.includes(n));
     if (!targets.length) {
-      targets = [COORDINATOR];
-      msg.mentions = [COORDINATOR];
+      targets = [coordinator()];
+      msg.mentions = [...targets];
     }
     if (asTask) {
       const owner = targets[0];
-      if (!st[owner]?.connected) {
-        this.p.system(`@${owner} 未连接，没法接这个任务。${st[owner]?.fix ? '接通方法：' + st[owner].fix : ''}`, { chainId: msg.chainId });
+      if (!st[owner]?.connected || !isEnabled(owner)) {
+        const off = offlineNote(owner, st);
+        this.p.system(`@${owner} ${off.what}，没法接这个任务。${off.fix}`, { chainId: msg.chainId });
       } else {
         const title = clip(text.replace(/[@＠][A-Za-z一-龥]+\s*/g, '').replace(/\s+/g, ' ').trim() || '群主的需求', 40);
         try {
-          this.tasks.create({ title, owner, creator: OWNER, deliver: '按群主这条消息的要求交付', accept: '群主验收', kind: owner === COORDINATOR ? '协调' : '实现', chainId: msg.chainId, originMsg: msg.id, noReview: review === false });
+          this.tasks.create({ title, owner, creator: OWNER, deliver: '按群主这条消息的要求交付', accept: '群主验收', kind: owner === coordinator() ? '协调' : '实现', chainId: msg.chainId, originMsg: msg.id, noReview: review === false });
         } catch (e) {
           this.p.system(`没能建任务卡：${e.message}`, { chainId: msg.chainId });
         }
@@ -422,7 +442,7 @@ export class Dispatcher {
     if (!rows.length) return false;
     const chat = isChatLane(lane);
     if (chat && rows.length >= ROTATE_RUNS) return true;
-    if (MEMBERS[agent]?.payPerUse) return false;
+    if (member(agent)?.payPerUse) return false;
     const u = J(rows[0].usage, {});
     const load = (u.input ?? 0) + ((u.cached ?? 0) > (u.input ?? 0) ? u.cached : 0);      // 有的成员把缓存命中另算，有的算在输入里
     return load > (chat ? ROTATE_CHAT_TOKENS : ROTATE_TASK_TOKENS);
@@ -459,10 +479,10 @@ export class Dispatcher {
   pump() {
     if (this.disposed || this.p.settings.paused || this.recovering) return;
     const st = this.env.status();
-    for (const agent of AGENTS) {
+    for (const agent of ALL_AGENTS) {
       const queued = all(this.db, "SELECT * FROM wakes WHERE target=? AND state='queued' AND run_id IS NULL ORDER BY id", agent);
       if (!queued.length) continue;
-      const usable = st[agent]?.connected && !this.p.settings.pausedAgents?.includes(agent) && !((this.cooling[agent] ?? 0) > now());
+      const usable = st[agent]?.connected && isEnabled(agent) && !this.p.settings.pausedAgents?.includes(agent) && !((this.cooling[agent] ?? 0) > now());
       const byLane = new Map();
       for (const w of queued) { const lane = this.laneOf(agent, w); if (!byLane.has(lane)) byLane.set(lane, []); byLane.get(lane).push(w); }
       let changed = false;
@@ -551,7 +571,7 @@ export class Dispatcher {
     // 不属于任何任务卡的对话（问一句、说一声）按“闲聊”那一档选，默认是快速档
     const reasonKind = primary.reason === 'review_request' ? 'review_request'
       : !task ? 'chat'
-      : (agent === COORDINATOR && (!isOwner || task.creator === OWNER || primary.reason === 'children_done')) ? 'coordinate' : 'task';
+      : (agent === coordinator() && (!isOwner || task.creator === OWNER || primary.reason === 'children_done')) ? 'coordinate' : 'task';
     // 而且只在“这次就是来返工的”时候升；之后在这张卡上的普通跟进不升
     const reworkRun = wakes.some((w) => ['review_failed', 'owner_rejected'].includes(w.reason));
     const pick = pickModel({
@@ -994,13 +1014,16 @@ export class Dispatcher {
       newCount: one(this.db, "SELECT COUNT(*) AS n FROM messages WHERE id>? AND kind='chat'", upto).n,
       running: [...this.active.values()].some((c) => c.kind === 'summary'),
       agent: meta?.agent ?? null, every: this.p.settings.summaryEvery ?? 30, auto: this.p.settings.summaryAuto !== false,
-      writer: this.p.settings.summaryAgent ?? COORDINATOR,
+      writer: this.summaryWriter(),
     };
   }
 
+  // 谁来写群摘要：群主在项目设置里选的那位；它停用了，就由协调员写
+  summaryWriter() { const a = this.p.settings.summaryAgent; return a && isEnabled(a) ? a : coordinator(); }
+
   summarize(by = OWNER) {
     const settings = this.p.settings;
-    const agent = settings.summaryAgent ?? COORDINATOR;
+    const agent = this.summaryWriter();
     const st = this.env.status();
     if (!st[agent]?.connected) throw new TaskError(`@${agent} 未连接，没法写群摘要。可以在设置里换一位成员来写。`);
     if ([...this.active.values()].some((c) => c.kind === 'summary')) throw new TaskError('群摘要正在整理中，等它写完。');

@@ -5,14 +5,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { ROSTER } from './roster.mjs';
 
-// 一张图标可以有几个来源，按顺序找第一个存在的。只写 app 表示用应用 Info.plist 里登记的应用图标
-const SOURCES = {
-  claude: [{ app: 'Claude.app' }],
-  'codex-light': [{ app: 'ChatGPT.app', file: 'Contents/Resources/icon-codex-light.png' }, { app: 'Codex.app' }],
-  'codex-dark': [{ app: 'ChatGPT.app', file: 'Contents/Resources/icon-codex-dark-color.png' }, { app: 'Codex.app' }],
-  deepseek: [{ app: 'DeepSeek Harness.app' }],
-};
+// 一张图标可以有几个来源，按顺序找第一个存在的。只写 app 表示用应用 Info.plist 里登记的应用图标。
+// 来源写在成员表里（roster.mjs 的 icon / iconDark）：<小写名字>.png 是浅色的，<小写名字>-dark.png 是深色外观下用的（没写就和浅色共用一张）
+const SOURCES = Object.fromEntries(ROSTER.flatMap((r) => [
+  ...(r.icon?.length ? [[r.id, r.icon]] : []),
+  ...(r.iconDark?.length ? [[`${r.id}-dark`, r.iconDark]] : []),
+]));
 export const ICON_NAMES = Object.keys(SOURCES);
 
 const APP_DIRS = ['/Applications', path.join(os.homedir(), 'Applications')];
@@ -69,7 +69,7 @@ export async function prepareIcons(dataDir) {
 }
 
 export function iconFile(dataDir, file) {
-  const m = /^([a-z-]+)\.png$/.exec(file ?? '');
+  const m = /^([a-z0-9-]+)\.png$/.exec(file ?? '');
   if (!m || !ICON_NAMES.includes(m[1])) return null;
   const p = path.join(dataDir, 'icons', file);
   return fs.existsSync(p) ? p : null;

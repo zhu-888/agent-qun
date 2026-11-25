@@ -8,8 +8,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { ALL_AGENTS } from './roster.mjs';
 
-export const AGENT_NAMES = ['Claude', 'Codex', 'DeepSeek'];
+// 成员表里的全部成员（停用的也算：它的模型设置要留着，重新启用时还在）
+export const AGENT_NAMES = ALL_AGENTS;
 export const TIER_LEVELS = ['快速', '常规', '高'];
 // 推理强度从低到高。不同模型支持的范围不一样，以目录里每个模型的 efforts 为准。
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
@@ -92,11 +94,13 @@ export function catalog(agent) {
   const lock = lockOf(agent);
   // 固定的那个模型不在读到的清单里（比如断网读不到、或官方改了名字）：照样列出来，不然界面上没法显示
   if (lock && !seen.has(lock.model)) { base.push({ id: lock.model, label: lock.model, efforts: [lock.effort], defaultEffort: lock.effort, source: 'missing' }); seen.add(lock.model); }
-  const efforts = agent === 'DeepSeek' ? ['low', 'high', 'max'] : FIVE;
+  const efforts = customEfforts(agent);
   const custom = (state.custom[agent] ?? []).filter((m) => !seen.has(m.id))
     .map((m) => ({ id: m.id, label: m.label || m.id, efforts, defaultEffort: efforts.includes('medium') ? 'medium' : 'high', source: 'custom' }));
   return [...base, ...custom];
 }
+// 自己加的模型能选哪几档推理强度（不知道它的真实范围，按这位成员的常见范围给）
+export function customEfforts(agent) { return agent === 'DeepSeek' ? ['low', 'high', 'max'] : FIVE; }
 export const findModel = (agent, id) => catalog(agent).find((m) => m.id === id) ?? null;
 export const modelLabel = (agent, id) => findModel(agent, id)?.label ?? id;
 // 这个模型不支持这一档推理强度时，退回它的默认档；目录里没有的模型原样放行
@@ -108,8 +112,8 @@ export function normalizeEffort(agent, id, effort) {
 export const appTiers = () => state.tiers;
 export function catalogView() {
   return Object.fromEntries(AGENT_NAMES.map((a) => [a, {
-    models: catalog(a), locked: lockOf(a), lockable: LOCKABLE[a] ?? null,
-    source: state.live[a] ? SOURCE[a] : a === 'Claude' ? SOURCE.Claude : `内置清单（没读到${SOURCE[a]}）`,
+    models: catalog(a), locked: lockOf(a), lockable: LOCKABLE[a] ?? null, customEfforts: customEfforts(a),
+    source: state.live[a] ? SOURCE[a] : a === 'Claude' ? SOURCE.Claude : SOURCE[a] ? `内置清单（没读到${SOURCE[a]}）` : '内置清单',
     fetchedTs: state.live[a]?.fetchedTs ?? null,
   }]));
 }

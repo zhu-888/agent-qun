@@ -13,13 +13,14 @@ import { serveRpc } from './rpc.mjs';
 import { TaskError } from './tasks.mjs';
 import { Quota } from './quota.mjs';
 import { sandboxStatus, inTempArea } from './boundary.mjs';
-import { AGENTS, MEMBERS, DEFAULT_KIND_LEVEL, LEVELS, COORDINATOR, tiersFor } from './members.mjs';
+import { ALL_AGENTS, member, enabledAgents, coordinator, configureMembers, cleanMemberSettings, upgradeSettings, DEFAULT_KIND_LEVEL, LEVELS, tiersFor } from './members.mjs';
+import { ROSTER } from './roster.mjs';
 import { configureModels, catalogView, refreshCodexModels, setDeepseekModels, lockOf, findModel, normalizeEffort, EFFORTS } from './models.mjs';
 import { Remote, RemoteError, phoneAllowed, tailscaleIp } from './remote.mjs';
 import { claude } from './agents/claude.mjs';
 import { codex } from './agents/codex.mjs';
 import { deepseek, DEEPSEEK_PRICES, isPeak } from './agents/deepseek.mjs';
-import { prepareIcons, iconFile } from './icons.mjs';
+import { prepareIcons, iconFile, ICON_NAMES } from './icons.mjs';
 
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_DIR = path.join(APP_DIR, 'data');
@@ -33,14 +34,23 @@ const readJson = (f, fb) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')
 const writeJson = (f, v) => { fs.writeFileSync(f + '.tmp', JSON.stringify(v, null, 2)); fs.renameSync(f + '.tmp', f); };
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const REGISTRY_FILE = path.join(DATA_DIR, 'projects.json');
-let appSettings = { deepseekApiAllowed: true, ...readJson(SETTINGS_FILE, {}) };
+let appSettings = upgradeSettings(readJson(SETTINGS_FILE, {}));      // 旧版的“允许 DeepSeek 使用 API key”并进成员表的启用开关
+// 群主改过的成员（启用 / 停用、分工）：启动时生效。存的内容不对就按出厂的来
+try { appSettings.members = configureMembers(appSettings.members); }
+catch (e) { console.error('设置里的成员配置不对，先按出厂的来：', e.message); appSettings.members = configureMembers({}); }
 let registry = readJson(REGISTRY_FILE, []);
 // 群主自己加的模型、改过的档位、固定模型：启动时生效。存的内容不对就当没有，不让它挡住启动
 try { configureModels({ customModels: appSettings.customModels, tiers: appSettings.tiers, lock: appSettings.modelLock }); }
 catch (e) { console.error('设置里的模型配置不对，先按默认的来：', e.message); configureModels({}); }
 
-const adapters = { Claude: claude, Codex: codex, DeepSeek: deepseek };
-let agentStatus = Object.fromEntries(AGENTS.map((a) => [a, { connected: false, detail: '正在检测…' }]));
+// 成员表里每一行的 adapter 对应这里的一个接入文件。加新成员时在这里登记（见 roster.mjs 开头的说明）
+const ADAPTER_MODULES = { claude, codex, deepseek };
+const adapters = Object.fromEntries(ROSTER.map((r) => {
+  if (!ADAPTER_MODULES[r.adapter]) throw new Error(`成员表里 ${r.name} 的接入方式「${r.adapter}」没有在 main.mjs 的 ADAPTER_MODULES 里登记`);
+  return [r.name, ADAPTER_MODULES[r.adapter]];
+}));
+const OFF = { connected: false, disabled: true, detail: '已停用：在设置 →「成员」里可以打开', fix: '到设置 →「成员」里打开它' };
+let agentStatus = Object.fromEntries(ALL_AGENTS.map((a) => [a, member(a).enabled ? { connected: false, detail: '正在检测…' } : OFF]));
 const status = () => agentStatus;
 
 const projects = new Map();   // id → { project, disp, stopRpc, clients:Set }
@@ -50,9 +60,9 @@ const remote = new Remote({ file: path.join(DATA_DIR, 'remote.json') });
 const quota = new Quota({ adapters, status, onChange: () => broadcastApp(), baselineFile: path.join(DATA_DIR, 'deepseek-baseline.json') });
 
 async function detectAgents() {
-  deepseek.enabled = !!appSettings.deepseekApiAllowed;
   codex.mode = appSettings.codexMode === 'exec' ? 'exec' : 'app-server';
-  const entries = await Promise.all(AGENTS.map(async (a) => {
+  const entries = await Promise.all(ALL_AGENTS.map(async (a) => {
+    if (!member(a).enabled) return [a, OFF];        // 停用的不去检测它的命令行（按量付费的成员也就不会去读它的 key）
     try { return [a, await adapters[a].detect()]; } catch (e) { return [a, { connected: false, detail: `检测失败：${e.message}` }]; }
   }));
   agentStatus = Object.fromEntries(entries);
@@ -234,11 +244,24 @@ function appState() {
         running: ctx ? [...new Set([...ctx.disp.active.values()].map((c) => c.agent))] : [],
       };
     }),
-    agents: AGENTS.map((a) => ({ name: a, ...MEMBERS[a], role: undefined, coordinator: a === COORDINATOR, canInject: !!adapters[a].canInject && !(a === 'Codex' && codex.mode === 'exec'), ...agentStatus[a] })),
+    // agents：启用的成员（群里、成员栏、@ 按钮都只列它们）；members：成员表的全部成员（设置里的成员表、旧消息的头像和颜色要用）
+    agents: enabledAgents().map((a) => {
+      const m = member(a);
+      return { name: a, account: a, accountLabel: m.accountLabel, title: m.title, payPerUse: m.payPerUse, coordinator: a === coordinator(), canInject: !!adapters[a].canInject && !(a === 'Codex' && codex.mode === 'exec'), ...agentStatus[a] };
+    }),
+    members: ALL_AGENTS.map((a) => {
+      const m = member(a);
+      return {
+        name: a, enabled: m.enabled, title: m.title, role: m.role, defaultTitle: m.defaultTitle, defaultRole: m.defaultRole,
+        accountLabel: m.accountLabel, payPerUse: m.payPerUse, coordinator: a === coordinator(), color: m.color,
+        icon: ICON_NAMES.includes(m.id) ? `/icons/${m.id}.png` : null, iconDark: ICON_NAMES.includes(`${m.id}-dark`) ? `/icons/${m.id}-dark.png` : null,
+        connected: !!agentStatus[a]?.connected, detail: agentStatus[a]?.detail ?? '',
+      };
+    }),
     quota: quota.view(),
     settings: appSettings,
     // tiers：自动选模型时三档各用什么（出厂默认 + 群主在设置里改的）；catalog：每位成员能选的全部模型和各自支持的推理强度
-    tiers: Object.fromEntries(AGENTS.map((a) => [a, tiersFor(a)])), catalog: catalogView(), efforts: EFFORTS,
+    tiers: Object.fromEntries(ALL_AGENTS.map((a) => [a, tiersFor(a)])), catalog: catalogView(), efforts: EFFORTS,
     kindLevel: DEFAULT_KIND_LEVEL, levels: LEVELS,
     deepseekPrices: { prices: DEEPSEEK_PRICES, peakNow: isPeak() },
     projectsRoot: PROJECTS_ROOT,
@@ -256,7 +279,7 @@ function projectState(ctx) {
     messages, wakesByMsg: disp.wakesForMessages(messages.map((m) => m.id)),
     tasks, wakes: disp.pendingWakes(), activity: disp.activity, runs: disp.runs(80), spend: disp.spend(),
     cooling: disp.cooling, files: project.listFiles(), summary: disp.summaryInfo(),
-    parallel: Object.fromEntries(AGENTS.map((a) => [a, disp.parallelLimit(a)])),
+    parallel: Object.fromEntries(ALL_AGENTS.map((a) => [a, disp.parallelLimit(a)])),
   };
 }
 
@@ -352,7 +375,12 @@ async function route(req, res) {
     if (parts[2] === 'settings') {
       const b = await body();
       const next = { ...appSettings };
-      for (const k of ['deepseekApiAllowed', 'codexMode']) if (k in b) next[k] = b[k];
+      for (const k of ['codexMode']) if (k in b) next[k] = b[k];
+      // 成员表：先检查，模型那边也没问题了再一起生效
+      let members = null;
+      if ('members' in b) {
+        try { members = cleanMemberSettings(b.members); } catch (e) { throw e.userFacing ? new TaskError(e.message) : e; }
+      }
       if ('customModels' in b || 'tiers' in b || 'modelLock' in b) {
         const prev = { customModels: appSettings.customModels, tiers: appSettings.tiers, lock: appSettings.modelLock };
         try {
@@ -363,9 +391,11 @@ async function route(req, res) {
           throw e.userFacing ? new TaskError(e.message) : e;
         }
       }
+      if (members) next.members = configureMembers(members);
       appSettings = next;
       writeJson(SETTINGS_FILE, appSettings);
       await detectAgents();
+      if (members) for (const { project, disp } of projects.values()) { project.ensureLayout(); try { disp.checkStale(); } catch { /* 下一分钟还会再查 */ } }
       return json(res, 200, appState());
     }
     if (parts[2] === 'pick-folder') {
@@ -490,7 +520,7 @@ async function route(req, res) {
         return json(res, 200, { task: t });
       }
       if (what === 'agent') {
-        if (!AGENTS.includes(a)) throw new TaskError('没有这个成员');
+        if (!ALL_AGENTS.includes(a)) throw new TaskError('没有这个成员');
         const s = project.settings;
         if (b2 === 'stop') return json(res, 200, { stopped: disp.stop(a) });
         if (b2 === 'pause') { project.patchSettings({ pausedAgents: [...new Set([...(s.pausedAgents ?? []), a])] }); return json(res, 200, {}); }

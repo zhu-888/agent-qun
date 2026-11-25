@@ -36,7 +36,6 @@
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --ease: cubic-bezier(0.22, 1, 0.36, 1); --t1: 140ms; --t2: 200ms; --t3: 320ms;
   --col: 800px;       /* 聊天一栏的最大宽度：再宽，一行字就太长了 */
-  --c-claude: #d4633a; --c-codex: #5560e8; --c-deepseek: #1f7fd1;     /* 三位成员各一种颜色，取自它们自己的图标 */
   --track: #dadade;   /* 额度圈、进度条没填的那一段 */
 }
 /* ---- 深色：层次靠深浅差和细线（深色底上阴影看不出来） ---- */
@@ -56,7 +55,6 @@
   --shadow-2: 0 0 0 1px rgba(130, 160, 230, .10), 0 4px 10px rgba(0, 0, 0, .30), 0 18px 44px rgba(0, 0, 0, .42), 0 40px 90px rgba(0, 0, 0, .36);
   --shadow-panel: 0 0 0 1px rgba(130, 160, 230, .07), 0 2px 8px rgba(0, 0, 0, .22), 0 16px 40px rgba(0, 0, 0, .30), 0 40px 100px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .04);
   --fade-top: #0d1322; --fade-bottom: #0a0f1a;
-  --c-claude: #ff8a5c; --c-codex: #8f98ff; --c-deepseek: #45c8f0;
   --track: #223049;
 }
 
@@ -138,10 +136,7 @@ select.pill:hover { border-color: var(--fg-3); color: var(--fg); }
 /* 成员的图标：启动时从这台电脑上装好的应用里取（不随项目发布）。取不到、不认识的名字（和群主）退回成字 */
 .face { display: inline-block; width: 28px; height: 28px; flex: none; background: center / contain no-repeat; }
 .face.s { width: 20px; height: 20px; } .face.xs { width: 16px; height: 16px; }
-.face[data-who="Claude"] { background-image: url(/icons/claude.png); }
-.face[data-who="Codex"] { background-image: url(/icons/codex-light.png); }
-:root[data-theme="dark"] .face[data-who="Codex"] { background-image: url(/icons/codex-dark.png); }
-.face[data-who="DeepSeek"] { background-image: url(/icons/deepseek.png); }
+/* 每位成员的图标和颜色（.face / .ag / .msg 的 [data-who]）由 app.js 按成员表生成，见 applyMemberLook */
 .face.txt { display: inline-grid; place-items: center; border-radius: 22%; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); color: var(--fg); font-size: 12px; font-weight: 500; line-height: 1; }
 .face.txt.s, .face.txt.xs { font-size: 11px; }
 /* 成员标记：小图标 + 名字 */
@@ -241,7 +236,6 @@ body.resizing * { transition: none !important; }
 .ag-ring .face { width: 34px; height: 34px; border-radius: 50%; background-size: 112%; }      /* 和外面的圈之间留一条发丝细的缝，不然 Claude 的橙色图标和橙色的弧会连成一片 */
 .ag-ring .ring-svg { z-index: 1; }
 .ag-ring .lamp { z-index: 2; }
-.ag[data-who="Claude"] { --who-c: var(--c-claude); } .ag[data-who="Codex"] { --who-c: var(--c-codex); } .ag[data-who="DeepSeek"] { --who-c: var(--c-deepseek); }
 .ring-svg { position: absolute; inset: 0; }
 .ring-svg svg { display: block; width: 44px; height: 44px; }
 /* 底圈是一整圈，上面那段有颜色的弧是还剩多少；按量付费的成员没有百分比，有余额就画满 */
@@ -575,6 +569,14 @@ dl.kv dd { margin: 0; color: var(--fg-2); overflow-wrap: anywhere; }
 .rows .r.wrap { flex-wrap: wrap; }
 .rows .r.wrap input[type="text"] { flex: 1 1 160px; }
 table.plain select.pill { max-width: 220px; }
+/* 设置 →「成员」：点“改分工”在那一行下面展开 */
+.rows .r.mem-edit { display: block; padding: 12px 16px 16px; background: var(--raised); }
+.me-f { display: flex; flex-direction: column; gap: 12px; }
+.me-f label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.me-f label small { display: block; font-size: 12px; line-height: 20px; color: var(--fg-3); }
+.rows .me-f input[type="text"] { flex: none; width: 100%; }
+.me-act { display: flex; justify-content: flex-end; }
+.rl .tag { margin-left: 8px; }
 .rl { flex: 1; min-width: 0; font-size: 13px; } .rl.fixed { flex: none; width: 88px; color: var(--fg-2); }
 .rl small { display: block; font-size: 12px; line-height: 20px; color: var(--fg-3); }
 .rows input[type="text"], .rows input[type="number"], .field { height: 32px; padding: 0 8px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); font-size: 13px; transition: border-color var(--t1) var(--ease); }
@@ -696,9 +698,6 @@ details.logrow summary { cursor: pointer; font: 12px/20px var(--sans); color: va
 /* 聊天 */
 :root[data-theme="dark"] .msg.me .msg-body { background: linear-gradient(180deg, rgba(61, 123, 255, .26), rgba(61, 123, 255, .16)); box-shadow: inset 0 0 0 1px rgba(106, 165, 255, .30); }
 :root[data-theme="dark"] .msg.me .msg-body .chip, :root[data-theme="dark"] .msg.me .msg-body code { background: rgba(255, 255, 255, .12); }
-:root[data-theme="dark"] .msg[data-who="Claude"] .msg-head .who { color: var(--c-claude); }
-:root[data-theme="dark"] .msg[data-who="Codex"] .msg-head .who { color: var(--c-codex); }
-:root[data-theme="dark"] .msg[data-who="DeepSeek"] .msg-head .who { color: var(--c-deepseek); }
 :root[data-theme="dark"] .msg-head .model { color: #7f9fd6; }
 :root[data-theme="dark"] .chip { background: rgba(106, 165, 255, .14); color: #d6e4ff; }
 :root[data-theme="dark"] .chip:hover { background: rgba(106, 165, 255, .26); }

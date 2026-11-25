@@ -78,12 +78,43 @@ const until = (ts) => {
 const size = (n) => (n < 1024 ? `${n} 字节` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 const tok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)} 百万` : n >= 1e4 ? `${(n / 1e4).toFixed(1)} 万` : String(n));
 const base = (p) => p.split('/').pop();
+// 消息开头的 @成员（成员表里的全部名字，不分大小写）
+const mentionRe = () => new RegExp(`[@＠](?:${(S.app?.members ?? []).map((m) => m.name).join('|') || '(?!)'})\\s*`, 'gi');
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch { /* 隐私模式下存不了就算了 */ } },
 };
-// 成员的图标：工作台启动时从这台电脑上装好的应用里取出来的（data/icons/，不随项目发布）。群主和不认识的名字退回成一个字
-const MEMBER_ICONS = new Set(['Claude', 'Codex', 'DeepSeek']);
+// 成员的图标和颜色来自成员表（S.app.members，服务端的 roster.mjs）。
+// 图标是工作台启动时从这台电脑上装好的应用里取出来的（data/icons/，不随项目发布）；取不到的成员、群主和不认识的名字退回成一个字
+let MEMBER_ICONS = new Set();
+let memberLookKey = '';
+function applyMemberLook() {
+  const ms = S.app?.members ?? [];
+  const key = JSON.stringify(ms.map((m) => [m.name, m.color, m.icon, m.iconDark]));
+  if (key === memberLookKey) return;
+  memberLookKey = key;
+  const css = ms.map((m) => {
+    const w = `[data-who="${CSS.escape(m.name)}"]`;
+    return [
+      m.icon && `.face${w} { background-image: url("${m.icon}"); }`,
+      m.iconDark && `:root[data-theme="dark"] .face${w} { background-image: url("${m.iconDark}"); }`,
+      `.ag${w} { --who-c: ${m.color.light}; }`,
+      `:root[data-theme="dark"] .ag${w} { --who-c: ${m.color.dark}; }`,
+      `:root[data-theme="dark"] .msg${w} .msg-head .who { color: ${m.color.dark}; }`,
+    ].filter(Boolean).join('\n');
+  }).join('\n');
+  let el = document.getElementById('member-look');
+  if (!el) { el = h('style', { id: 'member-look' }); document.head.append(el); }
+  el.textContent = css;
+  MEMBER_ICONS = new Set(ms.filter((m) => m.icon).map((m) => m.name));
+  // 取不到图标（没装那个应用，或者不是 macOS）时，那位成员退回成两个字母的头像
+  for (const m of ms) {
+    if (!m.icon) continue;
+    const img = new Image();
+    img.onerror = () => { MEMBER_ICONS.delete(m.name); renderAll(); };
+    img.src = m.icon;
+  }
+}
 function face(who, size = '') {
   if (MEMBER_ICONS.has(who)) return h('span', { class: `face ${size}`, dataset: { who }, 'aria-hidden': 'true' });
   return h('span', { class: `face txt ${size}`, 'aria-hidden': 'true' }, who === OWNER ? '我' : String(who).slice(0, 2));
@@ -219,7 +250,7 @@ function loadAppQuiet() {
   }, 300);
 }
 
-function renderAll() { renderToolbar(); renderSidebar(); renderSummary(); renderChat(); renderRail(); renderLive(); renderTasks(); renderComposer(); }
+function renderAll() { applyMemberLook(); renderToolbar(); renderSidebar(); renderSummary(); renderChat(); renderRail(); renderLive(); renderTasks(); renderComposer(); }
 
 // ---- 菜单（点按钮弹出的那种） ------------------------------------------------
 function openMenu(anchor, items, align = 'left') {
@@ -271,7 +302,7 @@ function msgChat(m) {
 }
 const inScope = (chain) => S.chat === 'all' || chain === S.chat;
 function chatTitleOf(id) {
-  return chatInfo(id)?.title ?? S.proj?.messages.find((m) => m.id === id)?.text.replace(/[@＠](?:Claude|Codex|DeepSeek)\s*/g, '').slice(0, 40) ?? '对话';
+  return chatInfo(id)?.title ?? S.proj?.messages.find((m) => m.id === id)?.text.replace(mentionRe(), '').slice(0, 40) ?? '对话';
 }
 function openChat(pid, chat) {
   closeDrawers(); closeAgent();
@@ -441,6 +472,7 @@ $('#bellBtn').addEventListener('click', (e) => {
 });
 
 function renderSidebar() {
+  applyMemberLook();
   if (!S.app) return;
   renderAgents(); renderTree(); renderAgentPop();
   const items = bellItems();
@@ -1808,7 +1840,24 @@ function settingsDialog() {
   const tmo = num({ min: 3, max: 180, value: s.runTimeoutMin });
   const table = { ...S.app.kindLevel, ...(s.kindLevel ?? {}) };
   const sels = {};
-  const ds = h('input', { type: 'checkbox', class: 'switch', checked: S.app.settings.deepseekApiAllowed });
+  // ---- 成员表：启用 / 停用、分工。对所有项目生效 ----
+  const mem = Object.fromEntries((S.app.members ?? []).map((m) => {
+    const on = h('input', { type: 'checkbox', class: 'switch', checked: m.enabled, 'aria-label': `启用 @${m.name}` });
+    const title = h('input', { type: 'text', value: m.title, maxlength: 40, placeholder: m.defaultTitle, 'aria-label': `@${m.name} 的一句话分工` });
+    const role = h('textarea', { class: 'field', rows: 4, maxlength: 800, placeholder: m.defaultRole, 'aria-label': `@${m.name} 的详细分工` });
+    role.value = m.role;
+    const box = h('div', { class: 'r mem-edit', hidden: true },
+      h('div', { class: 'me-f' },
+        h('label', {}, h('span', {}, '一句话分工', h('small', {}, '协调员按它派活，群里和成员栏也显示它')), title),
+        h('label', {}, h('span', {}, '详细分工', h('small', {}, '写给这位成员自己看的工作说明')), role),
+        h('div', { class: 'me-act' }, h('button', { class: 'btn small', onclick: () => { title.value = m.defaultTitle; role.value = m.defaultRole; } }, '恢复出厂分工'))));
+    const sub = h('small', {});
+    const drawSub = () => { sub.textContent = [title.value.trim() || m.defaultTitle, m.accountLabel, !on.checked ? '已停用' : m.connected ? null : '未连接'].filter(Boolean).join(' · '); };
+    title.addEventListener('input', drawSub); on.addEventListener('change', drawSub); drawSub();
+    const edit = h('button', { class: 'btn small', 'aria-expanded': 'false', onclick: () => { box.hidden = !box.hidden; edit.setAttribute('aria-expanded', String(!box.hidden)); edit.textContent = box.hidden ? '改分工' : '收起'; } }, '改分工');
+    const head = h('div', { class: 'r' }, h('span', { class: 'rl' }, memTok(m.name), m.coordinator && h('span', { class: 'tag', title: '没人被点名的需求由它接' }, '协调员'), sub), edit, on);
+    return [m.name, { on, title, role, nodes: [head, box] }];
+  }));
   const sm = S.proj.summary ?? {};
   const sumAgent = h('select', { class: 'pill' }, S.app.agents.map((a) => h('option', { value: a.name, selected: a.name === sm.writer }, `@${a.name}（${S.app.tiers[a.name]?.快速?.label ?? ''}${a.payPerUse ? '，按量付费' : ''}）`)));
   const sumEvery = num({ min: 5, max: 500, value: sm.every ?? 30 });
@@ -1822,10 +1871,13 @@ function settingsDialog() {
   // ---- 模型：目录里的全部模型都能选，选完模型再选推理强度 ----
   const cat = S.app.catalog ?? {};
   const FIVE = ['low', 'medium', 'high', 'xhigh', 'max'];
-  const custom = Object.fromEntries(['Claude', 'Codex'].map((a) => [a, [...(S.app.settings.customModels?.[a] ?? [])]]));
+  const allNames = (S.app.members ?? []).map((m) => m.name);
+  const onNames = S.app.agents.map((a) => a.name);
+  const custom = Object.fromEntries(allNames.map((a) => [a, [...(S.app.settings.customModels?.[a] ?? [])]]));
   const modelsOf = (a) => {
     const base = (cat[a]?.models ?? []).filter((x) => x.source !== 'custom');
-    const mine = (custom[a] ?? []).filter((c) => !base.some((b) => b.id === c.id)).map((c) => ({ id: c.id, label: c.label || c.id, efforts: FIVE, defaultEffort: 'medium', source: 'custom' }));
+    const ef = cat[a]?.customEfforts ?? FIVE;
+    const mine = (custom[a] ?? []).filter((c) => !base.some((b) => b.id === c.id)).map((c) => ({ id: c.id, label: c.label || c.id, efforts: ef, defaultEffort: ef.includes('medium') ? 'medium' : ef[0], source: 'custom' }));
     return [...base, ...mine];
   };
   const pairs = [];
@@ -1852,27 +1904,28 @@ function settingsDialog() {
     return { ms, es };
   };
   // 设了固定模型的成员不看档位表，表里就不列它
-  const tierAgents = ['Claude', 'Codex', 'DeepSeek'].filter((a) => !cat[a]?.locked);
+  const tierAgents = allNames.filter((a) => !cat[a]?.locked);
   const tierVal = Object.fromEntries(tierAgents.map((a) => [a, Object.fromEntries([...S.app.levels].reverse().map((lv) => [lv, { model: S.app.tiers[a]?.[lv]?.model, effort: S.app.tiers[a]?.[lv]?.effort }]))]));
-  const tierRows = tierAgents.flatMap((a) => Object.keys(tierVal[a]).map((lv) => {
+  const tierRows = tierAgents.filter((a) => onNames.includes(a)).flatMap((a) => Object.keys(tierVal[a]).map((lv) => {
     const { ms, es } = modelPair(a, tierVal[a][lv], `@${a} ${lv}档`);
     return h('tr', {}, h('td', {}, memTok(a)), h('td', {}, `${lv}档`), h('td', {}, ms), h('td', {}, es));
   }));
   // 固定模型：出厂不固定。打开后这位成员只用这一个模型和这一档推理强度
-  const lockVal = { ...(cat.DeepSeek?.locked ?? cat.DeepSeek?.lockable ?? {}) };
-  const lockPair = cat.DeepSeek?.lockable ? modelPair('DeepSeek', lockVal, '@DeepSeek 固定用') : null;
-  const lockOn = h('input', { type: 'checkbox', class: 'switch', checked: !!cat.DeepSeek?.locked, 'aria-label': '@DeepSeek 固定只用一个模型' });
+  const lockWho = onNames.find((a) => cat[a]?.lockable) ?? null;
+  const lockVal = { ...(cat[lockWho]?.locked ?? cat[lockWho]?.lockable ?? {}) };
+  const lockPair = lockWho ? modelPair(lockWho, lockVal, `@${lockWho} 固定用`) : null;
+  const lockOn = h('input', { type: 'checkbox', class: 'switch', checked: !!cat[lockWho]?.locked, 'aria-label': `@${lockWho} 固定只用一个模型` });
   const syncLock = () => { lockPair.ms.disabled = lockPair.es.disabled = !lockOn.checked; };
   if (lockPair) { lockOn.addEventListener('change', syncLock); syncLock(); }
   const price = (id) => { const pr = S.app.deepseekPrices?.prices?.[id]?.off; return pr ? `输入 ¥${pr.miss}、输出 ¥${pr.out}` : '价格表里还没有'; };
   const dsPrices = (cat.DeepSeek?.models ?? []).map((x) => `${x.label}：${price(x.id)}`).join('；');
   // 自己加的模型
-  const addWho = h('select', { class: 'pill', 'aria-label': '给哪位成员加模型' }, ['Claude', 'Codex'].map((a) => h('option', { value: a }, `@${a}`)));
+  const addWho = h('select', { class: 'pill', 'aria-label': '给哪位成员加模型' }, onNames.map((a) => h('option', { value: a }, `@${a}`)));
   const addId = h('input', { type: 'text', placeholder: '命令行认的模型名，例如 gpt-7-sol', 'aria-label': '模型名', spellcheck: 'false', autocomplete: 'off' });
   const addName = h('input', { type: 'text', placeholder: '显示的名字（可不填）', 'aria-label': '显示的名字' });
   const customBox = h('div', { class: 'rows' });
   const drawCustom = () => {
-    const rows = ['Claude', 'Codex'].flatMap((a) => custom[a].map((c) => h('div', { class: 'r' },
+    const rows = onNames.flatMap((a) => (custom[a] ?? []).map((c) => h('div', { class: 'r' },
       h('span', { class: 'rl' }, c.label || c.id, h('small', {}, `${a} · ${c.id}`)),
       h('button', { class: 'btn small destructive', onclick: () => { custom[a] = custom[a].filter((x) => x !== c); drawCustom(); pairs.forEach((d) => d()); } }, '删掉'))));
     if (!rows.length) rows.push(h('div', { class: 'r' }, h('span', { class: 'rl faint' }, '还没有自己加的模型')));
@@ -1882,7 +1935,7 @@ function settingsDialog() {
     const a = addWho.value, id = addId.value.trim();
     if (!/^[A-Za-z0-9][A-Za-z0-9._:\[\]\/-]{1,79}$/.test(id)) return toast('模型名要写命令行认的那个名字，只能有字母、数字和 . _ - : / [ ]', true);
     if (modelsOf(a).some((x) => x.id === id)) return toast(`@${a} 的目录里已经有 ${id} 了`, true);
-    custom[a] = [...custom[a], { id, label: addName.value.trim() || id }];
+    custom[a] = [...(custom[a] ?? []), { id, label: addName.value.trim() || id }];
     addId.value = ''; addName.value = '';
     drawCustom(); pairs.forEach((d) => d());
     toast(`已加到 @${a} 的目录里，点“保存”后生效`);
@@ -1893,44 +1946,46 @@ function settingsDialog() {
     const kindLevel = Object.fromEntries(Object.entries(sels).map(([k, el]) => [k, el.value]));
     await api(P('settings'), { hopLimit: Number(hop.value), runTimeoutMin: Number(tmo.value), kindLevel,
       summaryAgent: sumAgent.value, summaryEvery: Number(sumEvery.value), summaryAuto: sumAuto.checked,
-      parallel: Object.fromEntries(Object.entries(par).map(([k, el]) => [k, Number(el.value)])) });
-    S.app = await api('/api/app/settings', { deepseekApiAllowed: ds.checked, customModels: custom, tiers: tierVal, ...(lockPair ? { modelLock: lockOn.checked ? { DeepSeek: lockVal } : {} } : {}) });
+      parallel: { ...(s.parallel ?? {}), ...Object.fromEntries(Object.entries(par).map(([k, el]) => [k, Number(el.value)])) } });
+    const members = Object.fromEntries(Object.entries(mem).map(([k, v]) => [k, { enabled: v.on.checked, title: v.title.value, role: v.role.value }]));
+    const lock = lockPair ? { ...Object.fromEntries(Object.entries(cat).filter(([a, c]) => a !== lockWho && c.locked).map(([a, c]) => [a, c.locked])), ...(lockOn.checked ? { [lockWho]: lockVal } : {}) } : undefined;
+    S.app = await api('/api/app/settings', { members, customModels: custom, tiers: tierVal, ...(lock ? { modelLock: lock } : {}) });
     closeSheet(); toast('已保存'); renderAll(); loadProject();
   };
   sheet({
     title: `设置 ·「${S.proj.name}」`, size: 'mid',
     body: h('div', { class: 'form' },
+      group('成员', Object.values(mem).flatMap((v) => v.nodes),
+        '对所有项目生效。停用的成员不会被唤醒，也不出现在群里和 @ 按钮里；它手上的任务卡会停着，等你改派，或重新打开它接着做。按量付费的成员打开就表示允许它用自己的 API key；订阅额度用尽时不会自动换成收费 API。'),
       group('交接和运行', [
         row('成员之间最多自动交接几次', '一条需求里超过这个次数，就停下来问你', hop),
         row('单次运行最长多少分钟', '超时自动停止', tmo)]),
       group('同时开几个会话', S.app.agents.map((a) => row(memTok(a.name), a.payPerUse ? '按量付费，开多了花钱更快' : null, par[a.name])),
         '每张任务卡一个会话；同一位成员的几个会话各写各的范围，互相改不到。'),
       group('任务类型 → 模型档位', h('table', { class: 'plain' },
-        h('thead', {}, h('tr', {}, h('th', {}, '任务类型'), h('th', {}, '档位'), h('th', {}, 'Claude 用'), h('th', {}, 'Codex 用'), h('th', {}, 'DeepSeek 用'))),
+        h('thead', {}, h('tr', {}, h('th', {}, '任务类型'), h('th', {}, '档位'), onNames.map((a) => h('th', {}, `${a} 用`)))),
         h('tbody', {}, Object.keys(table).map((kind) => {
-          const cells = ['Claude', 'Codex', 'DeepSeek'].map((a) => [a, h('td', { class: 'muted' })]);
+          const cells = onNames.map((a) => [a, h('td', { class: 'muted' })]);
           const fill = () => { for (const [a, td] of cells) td.textContent = S.app.tiers[a]?.[sel.value]?.label ?? ''; };
           const sel = sels[kind] = h('select', { class: 'pill', onchange: fill }, S.app.levels.map((lv) => h('option', { value: lv, selected: table[kind] === lv }, lv)));
           fill();
           return h('tr', {}, h('td', {}, kind), h('td', {}, sel), cells.map(([, td]) => td));
         }))),
-        `成员的模型选“自动”时按这张表选；订阅成员的任务被打回重做会自动升一档。“闲聊”指不建任务卡的对话（问一句、说一声），默认用快速档，省额度。${cat.DeepSeek?.locked ? '@DeepSeek 设了固定模型，不看这张表。' : ''}`),
+        `成员的模型选“自动”时按这张表选；订阅成员的任务被打回重做会自动升一档。“闲聊”指不建任务卡的对话（问一句、说一声），默认用快速档，省额度。${onNames.filter((a) => cat[a]?.locked).map((a) => `@${a} 设了固定模型，不看这张表。`).join('')}`),
       group('自动选模型时，三档各用哪个模型', h('table', { class: 'plain' },
         h('thead', {}, h('tr', {}, ['成员', '档位', '模型', '推理强度'].map((x) => h('th', {}, x)))),
         h('tbody', {}, tierRows)),
         `对所有项目生效。目录里的模型都能选：${cat.Codex?.source ?? ''}里现在有 ${(cat.Codex?.models ?? []).filter((x) => x.source !== 'custom').length} 个，Claude 有 ${(cat.Claude?.models ?? []).filter((x) => x.source !== 'custom').length} 个。想让某位成员一直用同一个模型，在左栏它的下拉框里直接选。`),
-      lockPair && group('@DeepSeek 固定用一个模型', [
+      lockPair && group(`@${lockWho} 固定用一个模型`, [
         h('label', { class: 'r' }, h('span', { class: 'rl' }, '固定只用这一个', h('small', {}, '打开后，自动选模型、任务卡档位、打回重做，都不会换它')), lockOn),
         h('div', { class: 'r' }, h('span', { class: 'rl' }, '模型和推理强度'), lockPair.ms, lockPair.es)],
-        `按量付费，对所有项目生效。想控制花费时打开。deepseek-flash 这个名字由官方指向最新的 Flash，官方更新后自动用新的。空闲时段每百万 token：${dsPrices}（高峰时段翻倍）。`),
+        lockWho === 'DeepSeek' ? `按量付费，对所有项目生效。想控制花费时打开。deepseek-flash 这个名字由官方指向最新的 Flash，官方更新后自动用新的。空闲时段每百万 token：${dsPrices}（高峰时段翻倍）。` : '对所有项目生效。想控制花费时打开。'),
       group('自己加的模型', customBox,
         '以后出了新模型、目录里还没有，就在这里加：选成员，填命令行认的模型名。加完它会出现在上面和左栏的下拉框里。名字填错的话运行时会报错，删掉重加即可。'),
       group('群摘要', [
         row('由谁来写', '用它的快速档模型', sumAgent),
         row('群里空闲时自动更新', null, sumAuto),
         row('每攒够多少条新发言更新一次', null, sumEvery)]),
-      group('按量付费', [row('允许 @DeepSeek 使用 API key', '用 DeepSeek Harness 里存的 key，按量付费，对所有项目生效', ds)],
-        '订阅额度用尽时，成员会保存进度等恢复，不会自动切换到收费 API。'),
       group('外观', [h('div', { class: 'r' }, h('span', { class: 'rl' }, '浅色或深色', h('small', {}, '只影响这台电脑上的这个浏览器，立即生效')), themeSeg)])),
     foot: [h('button', { class: 'btn', onclick: closeSheet }, '取消'), h('button', { class: 'btn prominent', onclick: save }, '保存')],
   });
@@ -2021,12 +2076,6 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---- 启动 -----------------------------------------------------------------
-// 取不到图标（没装那个应用，或者不是 macOS）时，那位成员退回成两个字母的头像
-for (const [name, file] of [['Claude', 'claude'], ['Codex', 'codex-light'], ['DeepSeek', 'deepseek']]) {
-  const img = new Image();
-  img.onerror = () => { MEMBER_ICONS.delete(name); if (S.app) renderAll(); };
-  img.src = `/icons/${file}.png`;
-}
 applyTheme();
 try {
   await loadApp();

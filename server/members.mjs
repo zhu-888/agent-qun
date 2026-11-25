@@ -1,49 +1,74 @@
-// 群成员、分工、模型档位。
+// 群成员（启用了哪些、各自的分工）、默认审查人、模型档位。
+// 成员的出厂资料在 roster.mjs；群主在设置里改的（启用 / 停用、分工）存在 data/settings.json 的 members 里，启动和保存时经 configureMembers 生效。
 import { OWNER } from './mentions.mjs';
+import { ROSTER, ALL_AGENTS, rowOf } from './roster.mjs';
 import { lockOf, appTiers, normalizeEffort, modelLabel } from './models.mjs';
 
-export { OWNER };
-export const COORDINATOR = 'Claude';
-export const AGENTS = ['Claude', 'Codex', 'DeepSeek'];
+export { OWNER, ALL_AGENTS };
 
-export const MEMBERS = {
-  Claude: {
-    account: 'Claude',
-    accountLabel: 'Claude 订阅',
-    title: '协调员 · 干活主力 · 需求与审查',
-    role:
-      '你是默认协调员、需求和审查负责人，也是干活的主力：方案、界面、文档和一般的代码实现默认由你承担，不只做拆单和审查。' +
-      '没人被点名的需求由你接：把它拆成任务卡，写清负责人、交付物和验收条件。派活时看各成员是否已连接、额度还剩多少，谁的额度多就多偏向谁。' +
-      '你自己写的东西必须交给 Codex 审，不能自己审自己。',
-  },
-  Codex: {
-    account: 'Codex',
-    accountLabel: 'ChatGPT 订阅（Codex）',
-    title: '工程负责人',
-    role:
-      '你是工程负责人：做自动化脚本、接入、集成和测试。遇到不明文件格式可以直接 @DeepSeek。' +
-      '完成后提交实际文件、运行方法和测试结果，交给 Claude 审查。工程量大或你的额度紧张时，Claude 会分担实现，你改做审查。',
-  },
-  DeepSeek: {
-    account: 'DeepSeek',
-    accountLabel: 'DeepSeek API（按量付费）',
-    payPerUse: true,
-    title: '逆向与兼容性分析',
-    role:
-      '你负责对群主自有或获授权的软件、文件格式和版本差异做分析：对照样例找出字段变化，提交样例、证据、结论和未知项，再交给 Codex 实现。' +
-      '只分析项目里提供的材料。',
-  },
-};
+// ---- 群主的设置：启用、停用、改分工 ----------------------------------------------
+export const TITLE_MAX = 40;
+export const ROLE_MAX = 800;
+const fail = (msg) => { const e = new Error(msg); e.userFacing = true; throw e; };
+let over = {};          // { Codex: { enabled: false, title: '…', role: '…' } }，只存和出厂不一样的
 
-// 一位成员在一个项目里最多同时开几个会话（群主可在设置里改）。
-// Claude 是干活主力，默认开得多；DeepSeek 按量付费，默认不并行。
-export const DEFAULT_PARALLEL = { Claude: 3, Codex: 2, DeepSeek: 1 };
+// 检查群主填的内容。分工留空 = 恢复出厂；和出厂一样的不存，以后出厂分工更新了也能跟着变
+export function cleanMemberSettings(input) {
+  const out = {};
+  for (const r of ROSTER) {
+    const v = input?.[r.name];
+    if (!v || typeof v !== 'object') continue;
+    const o = {};
+    if (typeof v.enabled === 'boolean' && v.enabled !== r.enabled) o.enabled = v.enabled;
+    if (v.title != null) {
+      const t = String(v.title).replace(/\s+/g, ' ').trim();
+      if (t.length > TITLE_MAX) fail(`@${r.name} 的一句话分工最多 ${TITLE_MAX} 个字`);
+      if (t && t !== r.title) o.title = t;
+    }
+    if (v.role != null) {
+      const t = String(v.role).replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim();
+      if (t.length > ROLE_MAX) fail(`@${r.name} 的详细分工最多 ${ROLE_MAX} 个字`);
+      if (t && t !== r.role) o.role = t;
+    }
+    if (Object.keys(o).length) out[r.name] = o;
+  }
+  if (!ROSTER.some((r) => out[r.name]?.enabled ?? r.enabled)) fail('至少要留一位成员启用');
+  return out;
+}
+export function configureMembers(input) { over = cleanMemberSettings(input ?? {}); return over; }
+// 旧版设置升级：以前单独有个“允许 DeepSeek 使用 API key”开关，现在并进了成员表里 DeepSeek 那一行的启用开关
+export function upgradeSettings(settings) {
+  const s = { ...(settings ?? {}) };
+  if ('deepseekApiAllowed' in s) {
+    if (s.deepseekApiAllowed === false) s.members = { ...s.members, DeepSeek: { ...s.members?.DeepSeek, enabled: false } };
+    delete s.deepseekApiAllowed;
+  }
+  return s;
+}
+
+// 一位成员现在的资料：出厂的 + 群主改的
+export function member(name) {
+  const r = rowOf(name);
+  if (!r) return null;
+  const o = over[name] ?? {};
+  return { ...r, enabled: o.enabled ?? r.enabled, title: o.title ?? r.title, role: o.role ?? r.role, defaultTitle: r.title, defaultRole: r.role };
+}
+export const isEnabled = (name) => !!member(name)?.enabled;
+export const enabledAgents = () => ALL_AGENTS.filter(isEnabled);
+// 协调员：表里标了 coordinator 的那位；它停用了，就由表里第一位启用的成员接
+export function coordinator() {
+  const pref = ROSTER.find((r) => r.coordinator);
+  return pref && isEnabled(pref.name) ? pref.name : enabledAgents()[0] ?? ALL_AGENTS[0];
+}
+
+// 一位成员在一个项目里最多同时开几个会话（群主可在设置里改）。出厂值在成员表里
+export const DEFAULT_PARALLEL = Object.fromEntries(ROSTER.map((r) => [r.name, r.parallel]));
 export const MAX_PARALLEL = 6;
 
-// 默认审查人：谁干的活，就由另一位来审。
+// 默认审查人：谁干的活，就由另一位来审。先找协调员，再按表里的顺序找订阅成员，按量付费的放最后
 export function defaultReviewer(owner, connected) {
-  const prefer = owner === 'Claude' ? ['Codex', 'DeepSeek'] : ['Claude', 'Codex', 'DeepSeek'];
-  return prefer.find((n) => n !== owner && connected.includes(n)) ?? null;
+  const order = [coordinator(), ...ROSTER.filter((r) => !r.payPerUse).map((r) => r.name), ...ROSTER.filter((r) => r.payPerUse).map((r) => r.name)];
+  return [...new Set(order)].find((n) => n !== owner && connected.includes(n)) ?? null;
 }
 
 // ---- 模型档位 ----------------------------------------------------------
@@ -120,7 +145,7 @@ export function pickModel({ agent, task, settings, reason, highTierLow = false }
   if (task && task.rework > 0) {
     const up = LEVELS[Math.min(LEVELS.indexOf(level) + 1, LEVELS.length - 1)];
     // 按量付费的成员升档等于多花钱，这要群主自己决定，所以不自动升
-    if (MEMBERS[agent]?.payPerUse) { if (up !== level) why += '（被打回过；按量付费不自动升档，要升请在任务卡上改）'; }
+    if (member(agent)?.payPerUse) { if (up !== level) why += '（被打回过；按量付费不自动升档，要升请在任务卡上改）'; }
     else if (up !== level) { level = up; why += '，被打回过所以升一档'; }
   }
   // 高档模型的额度快用完时，自动降一档，把剩下的留给真正需要的任务

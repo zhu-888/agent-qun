@@ -49,11 +49,10 @@ export function readDshKey() {
 
 export const deepseek = {
   name: 'DeepSeek',
-  enabled: true,   // 由 main.mjs 按设置覆盖
+  // 群主在设置里停用 DeepSeek 时，工作台根本不会调用这里（main.mjs 的 detectAgents），也就不会去读它的 key
 
   async detect() {
     if (!fs.existsSync(LAUNCHER)) return { connected: false, detail: '没有找到 DeepSeek Harness', fix: '安装 DeepSeek Harness 桌面 app 后重启工作台' };
-    if (!this.enabled) return { connected: false, detail: '已安装，但群主没有允许使用按量付费的 API key', fix: '在设置里打开“允许 DeepSeek 使用 API key”' };
     const k = readDshKey();
     if (!k) return { connected: false, detail: '已安装，但没有找到 DeepSeek API key', fix: '在 DeepSeek Harness 的模型设置里填 API key' };
     return { connected: true, detail: `DeepSeek Harness 无界面模式 · ${k.source}`, billing: '按量 API' };

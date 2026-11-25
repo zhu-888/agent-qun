@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { openDb, all, one, run, J } from './store.mjs';
 import { parseMentions, OWNER } from './mentions.mjs';
-import { AGENTS } from './members.mjs';
+import { enabledAgents } from './members.mjs';
 
 export const DIRS = { inbox: '收件箱', shared: '共享区', members: '成员', internal: '.workgroup' };
 // 一次运行的 qun 请求目录（.workgroup/rpc/req/<运行号>/）。运行号只有字母数字，拼不出别的路径
@@ -44,7 +44,7 @@ export class Project extends EventEmitter {
     const mk = (...p) => fs.mkdirSync(path.join(this.dir, ...p), { recursive: true });
     mk(DIRS.inbox);
     mk(DIRS.shared);
-    for (const a of AGENTS) mk(DIRS.members, a);
+    for (const a of enabledAgents()) mk(DIRS.members, a);      // 停用的成员不建；以后打开它，第一次运行时会建
     mk(DIRS.internal, 'rpc', 'req');
     mk(DIRS.internal, 'rpc', 'res');
     mk(DIRS.internal, 'runs');

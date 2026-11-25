@@ -1,6 +1,7 @@
 // 启动一个真实的 CLI 进程：降低优先级（nice）、带超时、可整组停止，按行读它输出的 JSON 事件。
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import { ROSTER } from '../roster.mjs';
 
 export function runCli({ cmd, args, cwd, env, stdinText, keepStdinOpen = false, timeoutMs, logPath, logSkip = null, sandboxProfile = null, onJson, onText, onExit }) {
   const log = logPath ? fs.createWriteStream(logPath, { flags: 'a' }) : null;
@@ -96,11 +97,7 @@ export function runCli({ cmd, args, cwd, env, stdinText, keepStdinOpen = false, 
 // 给成员的进程准备环境变量：去掉会让 CLI 误以为自己是“嵌套运行”的变量，
 // 也去掉会把请求改道到别的服务商或按量计费 API 的变量（额度用尽不自动切到收费 API）。
 // 各家的 key、令牌：只给用得着的那一家。成员跑的命令能读到自己进程的环境变量，别家的不该放进去
-export const PROVIDER_SECRETS = {
-  Claude: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'],
-  Codex: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
-  DeepSeek: ['DEEPSEEK_API_KEY'],
-};
+export const PROVIDER_SECRETS = Object.fromEntries(ROSTER.map((r) => [r.name, r.secrets]));     // 每位成员自己的密钥变量名，在成员表里
 export const othersSecrets = (me) => Object.entries(PROVIDER_SECRETS).filter(([k]) => k !== me).flatMap(([, v]) => v);
 export function cleanEnv(extra = {}, { dropPrefixes = [], dropNames = [] } = {}) {
   const env = {};
