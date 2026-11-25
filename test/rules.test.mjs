@@ -18,6 +18,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import { seatbeltProfile, inTempArea, sandboxStatus, SANDBOX_EXEC, normalizeScopeEntry } from '../server/boundary.mjs';
 import { buildPrompt } from '../server/prompt.mjs';
 import { deniedLine, cleanEnv, othersSecrets } from '../server/agents/runner.mjs';
+import { acpAdapter, pickPermission, findConfigValue, loggedIn } from '../server/agents/acp.mjs';
 import { claude, toolDenied, CLAUDE_TOOLS } from '../server/agents/claude.mjs';
 import { sandboxArgs as codexSandboxArgs } from '../server/agents/codex.mjs';
 
@@ -1899,7 +1900,13 @@ test('成员表：新成员没写分工就是“通用干活”；表本身写�
   assert.throws(() => buildRoster([{ name: 'A1', adapter: 'x', coordinator: true }, { name: 'B1', adapter: 'y', coordinator: true }]), /一位默认协调员/);
   assert.throws(() => buildRoster([{ name: 'Kimi', adapter: 'x', color: { light: 'red' } }]), /#rrggbb/);
   // 出厂的三位：别处不再写死名字，全从这张表来
-  assert.deepEqual(ROSTER.map((r) => r.name), ['Claude', 'Codex', 'DeepSeek']);
+  assert.deepEqual(ROSTER.map((r) => r.name), ['Claude', 'Codex', 'DeepSeek', 'Kimi']);
+  const k = ROSTER.find((r) => r.name === 'Kimi');
+  assert.equal(k.adapter, 'acp');
+  assert.equal(k.enabled, false, 'Kimi 出厂停用：装好、登录后到设置里打开');
+  assert.equal(k.title, GENERIC_TITLE, '新成员默认通用干活');
+  assert.deepEqual(enabledAgents(), ['Claude', 'Codex', 'DeepSeek']);
+  assert.throws(() => buildRoster([{ name: 'Qwen', adapter: 'acp' }]), /acp\.command/);
   assert.equal(ROSTER.filter((r) => r.coordinator).map((r) => r.name).join(), 'Claude');
   assert.deepEqual(parseMentions('@ds 看一下，@克劳德 汇总'), ['DeepSeek', 'Claude'], '别名也从成员表读');
 });
@@ -1990,4 +1997,160 @@ test('改过的分工：成员自己的身份和协调员看到的名单都跟�
     const coord = buildPrompt({ agent: 'Claude', project, tasks, wakes: [{ reason: 'mention' }], connected: disp.connected(), resumed: false, qunPath: 'qun', writable: [], enforced: true });
     assert.match(coord, /@Codex：只写测试，已连接/);
   } finally { configureMembers({}); disp.dispose(); }
+});
+
+
+// ---- 通用 ACP 接入：用一个假的 ACP 成员测（不花钱、不联网） ---------------------------------
+// 它按 FAKE_ACP 的值演不同情况，把收到的每个请求记到 FAKE_ACP_LOG 里，测试再对照
+const FAKE_ACP = `
+import fs from 'node:fs';
+const mode = process.env.FAKE_ACP ?? 'ok';
+const log = (o) => fs.appendFileSync(process.env.FAKE_ACP_LOG, JSON.stringify(o) + '\\n');
+let buf = '', pend = new Map(), nid = 1000;
+const out = (o) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...o }) + '\\n');
+const upd = (sessionId, update) => out({ method: 'session/update', params: { sessionId, update } });
+const ask = (method, params) => new Promise((r) => { const id = ++nid; pend.set(id, r); out({ id, method, params }); });
+const models = [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'k-1', options: [{ value: 'k-1', name: 'K 一号' }, { value: 'k-2', name: 'K 二号' }] }];
+async function handle(m) {
+  if (m.id != null && !m.method) { pend.get(m.id)?.(m); return; }
+  log({ method: m.method, params: m.params });
+  const p = m.params ?? {};
+  if (m.method === 'initialize') return out({ id: m.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } } } });
+  if (m.method === 'session/new') {
+    if (mode === 'auth') return out({ id: m.id, error: { code: -32000, message: 'Authentication required' } });
+    return out({ id: m.id, result: { sessionId: 'sess-new', configOptions: models } });
+  }
+  if (m.method === 'session/resume') {
+    if (p.sessionId === 'gone') return out({ id: m.id, error: { code: -32002, message: 'Session not found' } });
+    return out({ id: m.id, result: { configOptions: models } });
+  }
+  if (m.method === 'session/set_config_option') return out({ id: m.id, result: { configOptions: [{ ...models[0], currentValue: p.value }] } });
+  if (m.method === 'session/prompt') {
+    const s = p.sessionId;
+    upd(s, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: '想一想' } });
+    upd(s, { sessionUpdate: 'agent_message_chunk', messageId: 'm1', content: { type: 'text', text: '先看一下' } });
+    upd(s, { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Run ls', kind: 'execute', status: 'pending', rawInput: { command: 'ls 共享区' } });
+    const perm = await ask('session/request_permission', { sessionId: s, toolCall: { toolCallId: 't1' }, options: [
+      { optionId: 'no', name: '拒绝', kind: 'reject_once' }, { optionId: 'once', name: '允许一次', kind: 'allow_once' }, { optionId: 'always', name: '总是允许', kind: 'allow_always' }] });
+    log({ permission: perm.result ?? perm.error });
+    upd(s, { sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'touch: 共享区/T9/a.md: Operation not permitted' } }] });
+    if (mode === 'fs') { const r = await ask('fs/write_text_file', { sessionId: s, path: '/tmp/x', content: 'x' }); log({ fsAnswer: r.error ? 'error' : 'ok' }); }
+    upd(s, { sessionUpdate: 'agent_message_chunk', messageId: 'm2', content: { type: 'text', text: '做完了，' } });
+    upd(s, { sessionUpdate: 'agent_message_chunk', messageId: 'm2', content: { type: 'text', text: '结果在共享区。' } });
+    upd(s, { sessionUpdate: 'usage_update', used: 5000, size: 200000, cost: { amount: 0.12, currency: 'CNY' } });
+    if (mode === 'hang') return;          // 不回 prompt：等着被停止
+    return out({ id: m.id, result: { stopReason: 'end_turn', usage: { inputTokens: 1200, cachedReadTokens: 800, outputTokens: 90, thoughtTokens: 30, totalTokens: 1320 } } });
+  }
+  if (m.method === 'session/cancel') { log({ cancelled: true }); process.exit(0); }
+  if (m.id != null) out({ id: m.id, error: { code: -32601, message: 'no' } });
+}
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\\n')) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (l.trim()) handle(JSON.parse(l)); } });
+`;
+function fakeAcp(mode = 'ok', { auth } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wg-acp-'));
+  const script = path.join(dir, 'fake-acp.mjs');
+  fs.writeFileSync(script, FAKE_ACP);
+  const logFile = path.join(dir, 'calls.jsonl');
+  const ad = acpAdapter({ name: 'Kimi', acp: { command: process.execPath, args: [script], env: { FAKE_ACP: mode, FAKE_ACP_LOG: logFile }, auth, loginFix: '在终端运行 kimi login' } });
+  const calls = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
+  return { ad, dir, calls };
+}
+function runAcp(ad, dir, opts = {}) {
+  return new Promise((resolve) => {
+    const seen = { activity: [], stream: [], denied: [], session: [] };
+    const h = ad.start({
+      cwd: dir, prompt: '把共享区整理一下', sessionId: null, pathPrefix: dir, logPath: path.join(dir, 'run.log'), timeoutMs: 20000, ...opts,
+      on: {
+        activity: (a) => seen.activity.push(a), stream: (t, id) => seen.stream.push([t, id]), denied: (line, what) => seen.denied.push([line, what]),
+        session: (sid, i) => seen.session.push([sid, i?.model]), done: (res) => resolve({ ...res, seen }),
+      },
+    });
+    opts.onStart?.(h);
+  });
+}
+
+test('ACP 接入：一轮完整对话——说话、调工具自动允许、被沙箱拦下、最终回复、用量和花费、会话号', async () => {
+  const { ad, dir, calls } = fakeAcp('ok');
+  const r = await runAcp(ad, dir);
+  assert.equal(r.status, 'ok', r.error);
+  assert.equal(r.finalText, '做完了，结果在共享区。', '最后一段话是回复，前面那段是过程');
+  assert.equal(r.sessionId, 'sess-new');
+  assert.deepEqual(r.seen.session, [['sess-new', 'K 一号']], '报出它实际用的模型');
+  assert.deepEqual(r.usage, { input: 1200, cached: 800, output: 90, reasoning: 30, cost: 0.12, currency: 'CNY' });
+  assert.ok(r.seen.activity.some((a) => a.kind === 'say' && a.text === '先看一下'));
+  assert.ok(r.seen.activity.some((a) => a.kind === 'cmd' && a.text === 'ls 共享区'));
+  assert.ok(r.seen.activity.some((a) => a.kind === 'think'));
+  assert.deepEqual(r.seen.stream.map(([t]) => t).join(''), '先看一下做完了，结果在共享区。', '逐字显示');
+  assert.equal(r.seen.denied.length, 1, '工具报 Operation not permitted：算被沙箱拦下');
+  assert.equal(r.seen.denied[0][1], 'ls 共享区');
+  const c = calls();
+  const init = c.find((x) => x.method === 'initialize').params;
+  assert.equal(init.protocolVersion, 1);
+  assert.deepEqual(init.clientCapabilities, { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, '不声明读写文件、终端：那些会绕过沙箱');
+  assert.equal(c.find((x) => x.method === 'session/new').params.cwd, path.resolve(dir));
+  assert.deepEqual(c.find((x) => x.permission).permission, { outcome: { outcome: 'selected', optionId: 'always' } }, '不弹窗，自动选“总是允许”');
+  assert.deepEqual(c.find((x) => x.method === 'session/prompt').params.prompt, [{ type: 'text', text: '把共享区整理一下' }]);
+});
+
+test('ACP 接入：接着上次的会话；接不上就开新的；选了模型就设上，没有这个模型用它的默认', async () => {
+  let { ad, dir, calls } = fakeAcp('ok');
+  let r = await runAcp(ad, dir, { sessionId: 'sess-old', model: 'k-2' });
+  assert.equal(r.status, 'ok');
+  assert.equal(r.sessionId, 'sess-old');
+  assert.ok(calls().some((x) => x.method === 'session/resume' && x.params.sessionId === 'sess-old'));
+  assert.ok(!calls().some((x) => x.method === 'session/new'));
+  assert.deepEqual(calls().find((x) => x.method === 'session/set_config_option').params, { sessionId: 'sess-old', configId: 'model', value: 'k-2' });
+  assert.deepEqual(r.seen.session, [['sess-old', 'K 二号']]);
+
+  ({ ad, dir, calls } = fakeAcp('ok'));
+  r = await runAcp(ad, dir, { sessionId: 'gone', model: 'k-9' });
+  assert.equal(r.status, 'ok');
+  assert.equal(r.sessionId, 'sess-new', '旧会话找不到：开新的，工作台记住新的会话号');
+  assert.ok(r.seen.activity.some((a) => a.kind === 'boot' && /接不上/.test(a.text)));
+  assert.ok(r.seen.activity.some((a) => a.kind === 'boot' && /没有「k-9」/.test(a.text)));
+  assert.ok(!calls().some((x) => x.method === 'session/set_config_option'));
+
+  ({ ad, dir, calls } = fakeAcp('ok'));
+  r = await runAcp(ad, dir, { sessionId: 'sess-old', ephemeral: true });
+  assert.equal(r.sessionId, null, '写群摘要这类一次性运行：不留会话');
+  assert.ok(calls().some((x) => x.method === 'session/new'));
+});
+
+test('ACP 接入：没登录时说清怎么登录；问工作台要读写文件就拒绝；停止时先按协议取消', async () => {
+  let { ad, dir } = fakeAcp('auth');
+  let r = await runAcp(ad, dir);
+  assert.equal(r.status, 'error');
+  assert.match(r.error, /Kimi 还没登录：在终端运行 kimi login/);
+
+  let calls;
+  ({ ad, dir, calls } = fakeAcp('fs'));
+  r = await runAcp(ad, dir);
+  assert.equal(r.status, 'ok');
+  assert.equal(calls().find((x) => x.fsAnswer).fsAnswer, 'error', '工作台不替成员写文件（那会绕过沙箱）');
+
+  ({ ad, dir, calls } = fakeAcp('hang'));
+  r = await runAcp(ad, dir, { onStart: (h) => setTimeout(() => h.stop('stopped'), 800) });
+  assert.equal(r.status, 'stopped');
+  assert.ok(calls().some((x) => x.method === 'session/cancel'), '先发 session/cancel');
+});
+
+test('ACP 接入：权限选项、模型配置项、登录检查这几个小判断', () => {
+  assert.deepEqual(pickPermission([{ optionId: 'a', kind: 'allow_once' }, { optionId: 'r', kind: 'reject_once' }]), { outcome: { outcome: 'selected', optionId: 'a' } });
+  assert.deepEqual(pickPermission([{ optionId: 'r', kind: 'reject_once' }]), { outcome: { outcome: 'cancelled' } }, '只有拒绝的选项：取消，不替它选');
+  const opts = [{ id: 'mdl', category: 'model', options: [{ group: 'g', name: '组', options: [{ value: 'x/k3', name: 'K3' }] }] }, { id: 'think', category: 'thought_level', options: [{ value: 'high', name: '高' }] }];
+  assert.deepEqual(findConfigValue(opts, 'model', 'x/k3'), { configId: 'mdl', value: 'x/k3', label: 'K3' }, '分组的选项也找得到');
+  assert.deepEqual(findConfigValue(opts, 'thought_level', 'high'), { configId: 'think', value: 'high', label: '高' });
+  assert.equal(findConfigValue(opts, 'model', 'nope'), null);
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wg-login-'));
+  const cred = path.join(home, 'credentials'), conf = path.join(home, 'config.toml');
+  const auth = { files: [cred], configHas: [[conf, 'api_key']] };
+  assert.equal(loggedIn(auth), false);
+  fs.mkdirSync(cred);
+  assert.equal(loggedIn(auth), false, '空目录不算');
+  fs.writeFileSync(conf, '[providers.kimi]\napi_key_env = "X"\n');
+  assert.equal(loggedIn(auth), true, '配置里填了 key 也算');
+  fs.rmSync(conf); fs.writeFileSync(path.join(cred, 'kimi-code.json'), '{}');
+  assert.equal(loggedIn(auth), true);
+  assert.equal(loggedIn(null), true, '没写怎么查就不查，交给运行时报错');
 });

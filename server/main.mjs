@@ -20,6 +20,7 @@ import { Remote, RemoteError, phoneAllowed, tailscaleIp } from './remote.mjs';
 import { claude } from './agents/claude.mjs';
 import { codex } from './agents/codex.mjs';
 import { deepseek, DEEPSEEK_PRICES, isPeak } from './agents/deepseek.mjs';
+import { acpAdapter } from './agents/acp.mjs';
 import { prepareIcons, iconFile, ICON_NAMES } from './icons.mjs';
 
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -43,9 +44,11 @@ let registry = readJson(REGISTRY_FILE, []);
 try { configureModels({ customModels: appSettings.customModels, tiers: appSettings.tiers, lock: appSettings.modelLock }); }
 catch (e) { console.error('设置里的模型配置不对，先按默认的来：', e.message); configureModels({}); }
 
-// 成员表里每一行的 adapter 对应这里的一个接入文件。加新成员时在这里登记（见 roster.mjs 开头的说明）
+// 成员表里每一行的 adapter 对应这里的一个接入文件。adapter: 'acp' 的成员共用通用 ACP 接入，每位一个实例；
+// 专用接入的新成员在这里登记（见 roster.mjs 开头的说明）
 const ADAPTER_MODULES = { claude, codex, deepseek };
 const adapters = Object.fromEntries(ROSTER.map((r) => {
+  if (r.adapter === 'acp') return [r.name, acpAdapter(r)];
   if (!ADAPTER_MODULES[r.adapter]) throw new Error(`成员表里 ${r.name} 的接入方式「${r.adapter}」没有在 main.mjs 的 ADAPTER_MODULES 里登记`);
   return [r.name, ADAPTER_MODULES[r.adapter]];
 }));
@@ -190,7 +193,8 @@ function removeProject(entry) {
 }
 
 // 一个项目里的对话列表：标题、最后一条消息的时间、有没有没读的、它引出的任务卡在什么状态
-const chatTitle = (text) => String(text ?? '').replace(/[@＠](?:Claude|Codex|DeepSeek)\s*/g, '').replace(/\s+/g, ' ').trim().slice(0, 40) || '（没有文字）';
+const MENTION_RE = new RegExp(`[@＠](?:${ALL_AGENTS.join('|')})\\s*`, 'gi');      // 成员表里的全部名字
+const chatTitle = (text) => String(text ?? '').replace(MENTION_RE, '').replace(/\s+/g, ' ').trim().slice(0, 40) || '（没有文字）';
 function chatList(ctx) {
   const { project, disp } = ctx;
   const meta = project.chatMeta();

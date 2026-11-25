@@ -1,12 +1,14 @@
 // 成员表：群里有哪些 AI 成员。每位成员一行，界面、派活、点名、图标、颜色、密钥隔离都从这里读。
 // 群主在设置里可以启用、停用每一位，也可以改它的分工（存在 data/settings.json 的 members 里，见 members.mjs）。
 //
-// 加一位新成员（比如另一家的命令行）：
-//   1. 在下面加一行。title、role 不写就是“通用干活”，群主之后可以在设置里改。
-//   2. 在 server/agents/ 里写它的接入文件（照 claude.mjs、codex.mjs、deepseek.mjs 的样子：detect / run，能插话就加 inject），
-//      再在 main.mjs 的 ADAPTER_MODULES 里登记一下。
-//   3. 想让它能选模型：在 models.mjs 的 BUILTIN 里列出它的模型，在 members.mjs 的 DEFAULT_TIERS 里写三档默认用哪个。
-//   4. 想在界面上看到它的额度：在 quota.mjs 里加一个读额度的办法（可选，不加就显示“暂不可获取”）。
+// 加一位新成员：
+//   · 它的命令行支持 ACP（Agent Client Protocol：Kimi Code、Qwen Code、Gemini CLI、OpenCode、Copilot CLI 等都支持）：
+//     在下面加一行，adapter: 'acp'，acp: { command, args } 写清怎么以 ACP 方式启动它，就够了（见 Kimi 那行）。
+//     模型、推理强度用它自己的默认；想指定，在设置里“自己加的模型”加上它认的模型名。
+//   · 不支持 ACP 的：在 server/agents/ 里写一个专用接入文件（照 claude.mjs、codex.mjs、deepseek.mjs 的样子：detect / start，
+//     能插话就加 inject），再在 main.mjs 的 ADAPTER_MODULES 里登记。
+//   · 都可以选做：在 models.mjs 的 BUILTIN 里列出它的模型、members.mjs 的 DEFAULT_TIERS 写三档默认；quota.mjs 里加读额度的办法。
+// title、role 不写就是“通用干活”，群主之后可以在设置里改。
 // 这里的字段都是“出厂值”，代码里别处不要再写死成员名字。
 
 // 新成员没写分工时用这两句
@@ -60,6 +62,25 @@ const ROWS = [
     parallel: 1,
     secrets: ['DEEPSEEK_API_KEY'],
   },
+  {
+    // 走通用 ACP 接入。出厂停用：要用的人先装好 Kimi Code 命令行并登录，再到设置里打开
+    name: 'Kimi',
+    adapter: 'acp',
+    acp: {
+      command: 'kimi', args: ['acp'],
+      installFix: '安装 Kimi Code 命令行：npm i -g @moonshot-ai/kimi-code（或 curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash），装好后重启工作台',
+      // 登录过的标志：设备码登录存的凭据，或者在配置里填了开放平台的 API key
+      auth: { files: ['~/.kimi-code/credentials'], configHas: [['~/.kimi-code/config.toml', 'api_key']] },
+      loginFix: '在终端运行：kimi login --region mainland-cn（用 Kimi 会员登录）；或者运行 kimi，用 /login 填 Kimi 开放平台的 API key',
+    },
+    enabled: false,
+    accountLabel: 'Kimi 会员或开放平台 API',
+    aliases: ['kimi', '月之暗面'],
+    color: { light: '#7c3aed', dark: '#b794ff' },
+    icon: [{ app: 'Kimi.app' }, { app: 'Kimi Code.app' }],
+    parallel: 1,
+    secrets: ['KIMI_MODEL_API_KEY', 'KIMI_API_KEY', 'MOONSHOT_API_KEY'],
+  },
 ];
 
 const NAME_RE = /^[A-Za-z][A-Za-z0-9]{1,19}$/;
@@ -71,6 +92,7 @@ function check(rows) {
     if (seen.has(r.name.toLowerCase())) throw new Error(`成员表：「${r.name}」重复了`);
     seen.add(r.name.toLowerCase());
     if (!r.adapter) throw new Error(`成员表：「${r.name}」没写 adapter`);
+    if (r.adapter === 'acp' && !r.acp?.command) throw new Error(`成员表：「${r.name}」走 ACP，要写 acp.command`);
     for (const c of [r.color?.light, r.color?.dark]) if (c && !COLOR_RE.test(c)) throw new Error(`成员表：「${r.name}」的颜色要写成 #rrggbb`);
   }
   if (rows.filter((r) => r.coordinator).length > 1) throw new Error('成员表：只能有一位默认协调员');

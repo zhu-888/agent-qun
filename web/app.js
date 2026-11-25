@@ -872,12 +872,22 @@ const runModel = (r) => `${modelLabel(r.agent, r.model)}${r.effort ? ' · ' + r.
 
 // ---- 中栏：群聊 -------------------------------------------------------------
 const PATH_RE = /((?:收件箱|共享区|成员)\/[^\s，。；、）)"'`［\]〔〕]+)/;
-const TOKEN_RE = new RegExp(`(\`[^\`\\n]+\`)|([@＠](?:Claude|Codex|DeepSeek|群主))|${PATH_RE.source}|(\\bT\\d+\\b)`, 'g');
+// 消息里要画成标记的东西：行内代码、@成员（成员表里的全部名字）和 @群主、文件路径、任务卡号。成员表变了就重建
+let tokenReKey = '', tokenReCache = null;
+function tokenRe() {
+  const names = (S.app?.members ?? []).map((m) => m.name);
+  const key = names.join('|');
+  if (key !== tokenReKey || !tokenReCache) {
+    tokenReKey = key;
+    tokenReCache = new RegExp(`(\`[^\`\\n]+\`)|([@＠](?:${[...names, '群主'].join('|')}))|${PATH_RE.source}|(\\bT\\d+\\b)`, 'g');
+  }
+  return tokenReCache;
+}
 
 function inlineText(part) {
   const out = [];
   let last = 0;
-  for (const m of part.matchAll(TOKEN_RE)) {
+  for (const m of part.matchAll(tokenRe())) {
     if (m.index > last) out.push(part.slice(last, m.index));
     last = m.index + m[0].length;
     if (m[1]) {
@@ -1096,7 +1106,7 @@ function showTip(el, m) {
   const names = (m.mentions ?? []).filter((x) => x !== OWNER);
   const parts = [
     h('div', { class: 'tip-head' }, h('time', {}, mdhm(m.ts)), names.length ? h('span', { class: 'faces' }, names.map((x) => face(x, 'xs'))) : null),
-    h('div', { class: 'tip-text' }, m.text.replace(/^(?:[@＠](?:Claude|Codex|DeepSeek)\s*)+/, '') || m.text),
+    h('div', { class: 'tip-text' }, m.text.replace(new RegExp(`^(?:${mentionRe().source})+`), '') || m.text),
   ];
   if (tone) parts.push(h('div', { class: 'tip-foot' }, tone[0] === 'done' ? icon('check') : h('span', { class: `lamp ${tone[0]}` }), tone[1]));
   tip.replaceChildren(...parts);
@@ -1904,7 +1914,8 @@ function settingsDialog() {
     return { ms, es };
   };
   // 设了固定模型的成员不看档位表，表里就不列它
-  const tierAgents = allNames.filter((a) => !cat[a]?.locked);
+  // 档位表只列有模型清单的成员：走 ACP、没有内置清单的成员用它自己的默认模型（想指定就在“自己加的模型”里加）
+  const tierAgents = allNames.filter((a) => !cat[a]?.locked && (cat[a]?.models?.length ?? 0) > 0);
   const tierVal = Object.fromEntries(tierAgents.map((a) => [a, Object.fromEntries([...S.app.levels].reverse().map((lv) => [lv, { model: S.app.tiers[a]?.[lv]?.model, effort: S.app.tiers[a]?.[lv]?.effort }]))]));
   const tierRows = tierAgents.filter((a) => onNames.includes(a)).flatMap((a) => Object.keys(tierVal[a]).map((lv) => {
     const { ms, es } = modelPair(a, tierVal[a][lv], `@${a} ${lv}档`);

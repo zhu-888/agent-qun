@@ -49,19 +49,24 @@ npm start
 
 ## 成员和接入方式
 
-出厂有三位成员：
+出厂有四位成员，前三位默认启用：
 
 | 成员 | 分工 | 真实接入 | 运行中插话 | 计费 |
 |---|---|---|---|---|
 | @Claude | 协调员、干活主力：方案、界面、文档、实现和审查 | Claude Code 命令行，流式输入：`claude -p --input-format stream-json`，用 `--resume` 接着上次的会话 | 支持 | Claude 订阅 |
 | @Codex | 工程负责人：自动化脚本、转换程序、接入和测试 | Codex 命令行的 `codex app-server`，用 `thread/resume` 接着上次的会话；沙箱限制它只能写项目文件夹。app-server 起不来时自动退回 `codex exec`（那时不能插话） | 支持 | ChatGPT 订阅 |
 | @DeepSeek | 逆向与兼容性分析：文件格式和版本差异 | DeepSeek Harness 无界面模式：`dsh --profile headless --json`，用 `--session-id` 接着上次的会话 | 不支持 | DeepSeek API，按量付费 |
+| @Kimi（出厂停用） | 通用干活 | Kimi Code 命令行的 ACP 模式：`kimi acp`，走通用 ACP 接入（见下面），用 `session/resume` 接着上次的会话 | 不支持 | Kimi 会员（含 Kimi Code 的是 Plus 及以上）或 Kimi 开放平台 API |
 
 接入前提：
 
 - **Claude**：命令行要登录过一次。工作台会自动找到 `claude` 命令（包括 Claude 桌面 app 自带的那份）。没登录时左栏会显示登录命令。
 - **Codex**：`codex login` 登录过。
 - **DeepSeek**：装了 DeepSeek Harness，并且在它的模型设置里填过 API key。工作台启动 DeepSeek 时把这把 key 放进它的进程环境里，不写日志、不写进项目、不显示。在“设置 → 成员”里把 DeepSeek 停用，就等于收回这个许可：工作台连它的 key 都不会去读。
+- **Kimi**：出厂停用。要用的话：
+  1. 装 Kimi Code 命令行（官方的新版，旧的 Python 版 `kimi-cli` 已停更）：`npm i -g @moonshot-ai/kimi-code`，或 `curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash`。
+  2. 登录，二选一：用 Kimi 会员登录，在终端运行 `kimi login --region mainland-cn`，按提示在浏览器里确认；或者用开放平台的 API key，运行 `kimi`，输入 `/login`，选 Kimi Platform，粘贴 key。key 由你自己粘贴给 Kimi，工作台不经手。
+  3. 到“设置 → 成员”里把 Kimi 打开。没装或没登录时，成员栏会显示“未连接”和该怎么做。
 
 哪位成员没接通，左栏就显示“未连接”和原因，@ 它时群里会明说“没有送达”，不会由别的模型顶替。
 
@@ -76,12 +81,26 @@ npm start
 
 ### 加一位新成员
 
-成员表在 `server/roster.mjs`，一位成员一行：名字、接入方式、分工、颜色、图标从哪个应用取、收费方式、默认开几个会话、它自己的密钥变量名。不写分工的新成员默认是“通用干活”。要接另一家命令行：
+成员表在 `server/roster.mjs`，一位成员一行：名字、接入方式、分工、颜色、图标从哪个应用取、收费方式、默认开几个会话、它自己的密钥变量名。不写分工的新成员默认是“通用干活”。
+
+**它的命令行支持 ACP 时，加一行就够了。** ACP（[Agent Client Protocol](https://agentclientprotocol.com)）是一个公开协议，很多编程命令行都支持，比如 Kimi Code（`kimi acp`）、Qwen Code（`qwen --acp`）、Gemini CLI（`gemini --acp`）、OpenCode（`opencode acp`，它自己又能接很多家模型）、GitHub Copilot CLI（`copilot --acp`）。照 Kimi 那一行写：`adapter: 'acp'`，`acp: { command, args }` 写怎么用 ACP 方式启动它；`auth` 写登录后会留下哪个凭据文件，工作台据此判断“没登录”。先在终端里装好、登录好那个命令行，再到设置里打开它。
+
+通用 ACP 接入（`server/agents/acp.mjs`）是这样工作的：
+
+- 每次运行开一个进程，走 `initialize` → `session/resume`（接着上次的会话；不支持就 `session/load`，都不行就开新会话）→ `session/prompt`。
+- 整个进程照样装在系统沙箱里，写入范围和其它成员一样由系统强制。工作台不向它提供“替它读写文件、跑命令”的能力，因为那些动作会发生在沙箱外面。
+- 它要用工具时会来问批不批准：工作台不弹窗，自动选“允许”，能写哪里由沙箱管。
+- 模型和推理强度默认用它自己的。想指定，到“设置 → 自己加的模型”里加上它认的模型名，工作台会通过 ACP 的配置项设上；它不认这个名字时照旧用默认，并在运行记录里说一声。
+- 比专用接入少两样：不能运行中插话（新消息排到这一步结束后），额度条没有（各家读额度的办法不一样）。
+
+**不支持 ACP 的命令行**，要写专用接入：
 
 1. 在 `server/roster.mjs` 里加一行。
 2. 在 `server/agents/` 里写它的接入文件（照 `claude.mjs`、`codex.mjs`、`deepseek.mjs` 的样子），再在 `server/main.mjs` 的 `ADAPTER_MODULES` 里登记。
 3. 想让它能选模型：在 `server/models.mjs` 的 `BUILTIN` 里列出模型，在 `server/members.mjs` 的 `DEFAULT_TIERS` 里写三档默认用哪个。
 4. 想看到它的额度：在 `server/quota.mjs` 里加一个读额度的办法。不加的话显示“暂不可获取”。
+
+T3 Code、T3 Chat 没有能直接拿来取用模型的接口：T3 Code 自己也是驱动你电脑上登录好的各家命令行（一部分走的正是 ACP），T3 Chat 没有公开 API。
 
 别处不写死成员名字：点名的别名、头像、颜色、审查人顺序、提示词里的成员名单都从这张表来。
 
@@ -409,7 +428,7 @@ DeepSeek 的花费主要看它那 26 万 token 的固定内容有没有命中缓
 server/        工作台服务（main.mjs 是入口）
   roster.mjs   成员表：有哪些成员、各自的接入方式、分工、颜色、图标、收费方式（加新成员从这里开始）
   members.mjs  启用 / 停用、改过的分工、协调员、默认审查人、模型档位
-  agents/      每位成员的接入：claude.mjs、codex.mjs、deepseek.mjs
+  agents/      每位成员的接入：claude.mjs、codex.mjs、deepseek.mjs，以及通用 ACP 接入 acp.mjs（Kimi 等）
   tasks.mjs    任务状态机
   dispatcher.mjs  唤醒、去重、交接上限、重启恢复、失败熔断、过时标记
   snapshots.mjs   改动快照：运行前后拍照、逐行对比、撤回、清理

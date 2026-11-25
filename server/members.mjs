@@ -108,7 +108,8 @@ export function tiersFor(agent, settings) {
   const out = {};
   for (const lv of LEVELS) {
     const t = lock ? { ...lock } : { ...DEFAULT_TIERS[agent]?.[lv], ...(appTiers()[agent]?.[lv] ?? {}), ...(settings?.tiers?.[agent]?.[lv] ?? {}) };
-    out[lv] = { model: t.model, effort: t.effort ?? null, label: `${modelLabel(agent, t.model)}${t.effort ? ' · ' + t.effort : ''}` };
+    // 没有内置模型清单的成员（比如走 ACP 的）：不指定，用它自己的默认模型
+    out[lv] = t.model ? { model: t.model, effort: t.effort ?? null, label: `${modelLabel(agent, t.model)}${t.effort ? ' · ' + t.effort : ''}` } : { model: null, effort: null, label: '它自己的默认模型' };
   }
   return out;
 }
